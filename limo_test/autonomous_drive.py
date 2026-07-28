@@ -56,6 +56,13 @@ class LaneTrack:
     points: list
 
 
+@dataclass
+class LanePairTrack:
+    left: LaneTrack
+    right: LaneTrack
+    valid: bool
+
+
 class LimoAutonomousDrive(Node):
     """Camera lane keeping with 2D lidar obstacle avoidance for AgileX LIMO."""
 
@@ -111,21 +118,23 @@ class LimoAutonomousDrive(Node):
         self.declare_parameter("lane_min_band_pixels", 8)
         self.declare_parameter("min_lane_band_count", 3)
         self.declare_parameter("lane_histogram_margin_ratio", 0.08)
-        self.declare_parameter("max_lane_peak_width_ratio", 0.055)
+        self.declare_parameter("max_lane_peak_width_ratio", 0.09)
         self.declare_parameter("max_lane_x_std_ratio", 0.14)
         self.declare_parameter("max_lane_band_jump_ratio", 0.16)
-        self.declare_parameter("min_lane_width_ratio", 0.30)
-        self.declare_parameter("max_lane_width_ratio", 0.72)
-        self.declare_parameter("max_lane_mask_ratio", 0.16)
+        self.declare_parameter("lane_pair_width_tolerance_ratio", 0.24)
+        self.declare_parameter("lane_pair_center_prior_ratio", 0.28)
+        self.declare_parameter("min_lane_width_ratio", 0.18)
+        self.declare_parameter("max_lane_width_ratio", 0.85)
+        self.declare_parameter("max_lane_mask_ratio", 0.24)
         self.declare_parameter("blank_white_mask_ratio", 0.65)
         self.declare_parameter("blank_black_road_ratio", 0.90)
         self.declare_parameter("blank_black_mask_ratio", 0.01)
         self.declare_parameter("black_road_value_max", 95)
         self.declare_parameter("black_road_saturation_min", 0)
-        self.declare_parameter("min_road_ratio_for_lane", 0.25)
-        self.declare_parameter("reflected_road_ratio_for_lane", 0.10)
-        self.declare_parameter("min_road_between_ratio", 0.18)
-        self.declare_parameter("reflected_road_between_ratio", 0.06)
+        self.declare_parameter("min_road_ratio_for_lane", 0.15)
+        self.declare_parameter("reflected_road_ratio_for_lane", 0.05)
+        self.declare_parameter("min_road_between_ratio", 0.08)
+        self.declare_parameter("reflected_road_between_ratio", 0.03)
         self.declare_parameter("camera_obstacle_roi_top_ratio", 0.72)
         self.declare_parameter("camera_obstacle_center_width_ratio", 0.46)
         self.declare_parameter("camera_obstacle_min_ratio", 0.06)
@@ -320,7 +329,7 @@ class LimoAutonomousDrive(Node):
         hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
         gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
 
-        white_mask = cv2.inRange(hsv, np.array([0, 0, 150]), np.array([180, 90, 255]))
+        white_mask = cv2.inRange(hsv, np.array([0, 0, 130]), np.array([180, 120, 255]))
         adaptive_white = cv2.adaptiveThreshold(
             gray,
             255,
@@ -492,12 +501,17 @@ class LimoAutonomousDrive(Node):
         )
 
         image_center = width / 2.0
-        left_track = self.find_lane_x_from_bands(mask, 0, int(image_center))
-        right_track = self.find_lane_x_from_bands(
-            mask,
-            int(image_center),
-            width,
-        )
+        pair_track = self.find_lane_pair_tracks(mask, road_mask, width)
+        if pair_track.valid:
+            left_track = pair_track.left
+            right_track = pair_track.right
+        else:
+            left_track = self.find_lane_x_from_bands(mask, 0, int(image_center))
+            right_track = self.find_lane_x_from_bands(
+                mask,
+                int(image_center),
+                width,
+            )
         left_x = left_track.x if left_track.valid else None
         right_x = right_track.x if right_track.valid else None
         left_count = left_track.count if left_track.valid else 0
@@ -625,6 +639,117 @@ class LimoAutonomousDrive(Node):
             lane_width_ratio,
             camera_valid,
         )
+
+    def find_lane_pair_tracks(self, mask, road_mask, width: int) -> LanePairTrack:
+        band_count = int(self.get_parameter("lane_search_band_count").value)
+        band_height = int(self.get_parameter("lane_search_band_height").value)
+        min_pixels = int(self.get_parameter("lane_min_band_pixels").value)
+        min_band_count = int(self.get_parameter("min_lane_band_count").value)
+        max_peak_width = (
+            width * float(self.get_parameter("max_lane_peak_width_ratio").value)
+        )
+        width_tolerance = float(
+            self.get_parameter("lane_pair_width_tolerance_ratio").value
+        )
+        center_prior = width * float(
+            self.get_parameter("lane_pair_center_prior_ratio").value
+        )
+
+        left_points = []
+        right_points = []
+        left_widths = []
+        right_widths = []
+        previous_center = width / 2.0
+        height = mask.shape[0]
+
+        for band in range(band_count):
+            y_end = height - band * band_height
+            y_start = max(0, y_end - band_height)
+            if y_end <= y_start:
+                continue
+
+            band_mask = mask[y_start:y_end, :]
+            histogram = np.sum(band_mask > 0, axis=0)
+            segments = self.histogram_segments(histogram, min_pixels, max_peak_width)
+            if len(segments) < 2:
+                continue
+
+            y_center = (y_start + y_end) / 2.0
+            y_ratio = y_center / max(height, 1)
+            expected_width = width * self.expected_lane_width_ratio_at(y_ratio)
+            best_pair = None
+            best_score = float("inf")
+
+            for left_segment in segments:
+                for right_segment in segments:
+                    if right_segment[0] <= left_segment[0]:
+                        continue
+                    lane_width = right_segment[0] - left_segment[0]
+                    width_error = abs(lane_width - expected_width)
+                    if width_error > expected_width * width_tolerance:
+                        continue
+                    center = (left_segment[0] + right_segment[0]) / 2.0
+                    center_error = abs(center - previous_center)
+                    if center_error > center_prior:
+                        continue
+                    road_score = 1.0 - self.road_between_lanes_ratio(
+                        road_mask,
+                        left_segment[0],
+                        right_segment[0],
+                    )
+                    score = width_error + 0.45 * center_error + 30.0 * road_score
+                    if score < best_score:
+                        best_score = score
+                        best_pair = (left_segment, right_segment, center)
+
+            if best_pair is None:
+                continue
+
+            left_segment, right_segment, previous_center = best_pair
+            left_points.append((left_segment[0], y_ratio))
+            right_points.append((right_segment[0], y_ratio))
+            left_widths.append(left_segment[1])
+            right_widths.append(right_segment[1])
+
+        if len(left_points) < min_band_count or len(right_points) < min_band_count:
+            empty = LaneTrack(None, 0, 1.0, 1.0, False, [])
+            return LanePairTrack(empty, empty, False)
+
+        left_track = self.make_track_from_points(left_points, left_widths, width)
+        right_track = self.make_track_from_points(right_points, right_widths, width)
+        return LanePairTrack(left_track, right_track, left_track.valid and right_track.valid)
+
+    def histogram_segments(self, histogram, min_pixels: int, max_width: float):
+        active = histogram >= min_pixels
+        segments = []
+        index = 0
+        while index < len(active):
+            if not active[index]:
+                index += 1
+                continue
+            start = index
+            while index + 1 < len(active) and active[index + 1]:
+                index += 1
+            end = index
+            segment_width = end - start + 1
+            if segment_width <= max_width:
+                local_histogram = histogram[start:end + 1]
+                peak_offset = int(np.argmax(local_histogram))
+                center = start + peak_offset
+                segments.append((center, segment_width))
+            index += 1
+        return segments
+
+    def make_track_from_points(self, points, widths, image_width: int) -> LaneTrack:
+        xs = np.array([point[0] for point in points])
+        x = float(np.mean(xs))
+        std_ratio = float(np.std(xs) / max(image_width, 1))
+        width_ratio = float(np.mean(widths) / max(image_width, 1))
+        max_std_ratio = float(self.get_parameter("max_lane_x_std_ratio").value)
+        valid = len(points) >= int(
+            self.get_parameter("min_lane_band_count").value
+        ) and std_ratio <= max_std_ratio
+        return LaneTrack(x, len(points), std_ratio, width_ratio, valid, points)
 
     def find_lane_x_from_bands(
         self,

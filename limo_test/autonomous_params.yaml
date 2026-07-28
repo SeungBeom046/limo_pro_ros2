@@ -40,21 +40,23 @@ limo_autonomous_drive:
     lane_min_band_pixels: 8
     min_lane_band_count: 3
     lane_histogram_margin_ratio: 0.08
-    max_lane_peak_width_ratio: 0.055
+    max_lane_peak_width_ratio: 0.09
     max_lane_x_std_ratio: 0.14
     max_lane_band_jump_ratio: 0.16
-    min_lane_width_ratio: 0.30
-    max_lane_width_ratio: 0.72
-    max_lane_mask_ratio: 0.16
+    lane_pair_width_tolerance_ratio: 0.24
+    lane_pair_center_prior_ratio: 0.28
+    min_lane_width_ratio: 0.18
+    max_lane_width_ratio: 0.85
+    max_lane_mask_ratio: 0.24
     blank_white_mask_ratio: 0.65
     blank_black_road_ratio: 0.90
     blank_black_mask_ratio: 0.01
     black_road_value_max: 95
     black_road_saturation_min: 0
-    min_road_ratio_for_lane: 0.25
-    reflected_road_ratio_for_lane: 0.10
-    min_road_between_ratio: 0.18
-    reflected_road_between_ratio: 0.06
+    min_road_ratio_for_lane: 0.15
+    reflected_road_ratio_for_lane: 0.05
+    min_road_between_ratio: 0.08
+    reflected_road_between_ratio: 0.03
     camera_obstacle_roi_top_ratio: 0.72
     camera_obstacle_center_width_ratio: 0.46
     camera_obstacle_min_ratio: 0.06
