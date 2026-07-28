@@ -1,24 +1,43 @@
 # LIMO Autonomous Drive
 
 카메라 2D 차선 중심 추종과 2D 라이다 장애물 회피를 합친 실차용 ROS2 노드입니다.
-기존 패키지 설정 파일을 수정하지 않기 위해 `ros2 run` 엔트리포인트 대신 Python
-모듈로 실행합니다.
+## 빌드
 
-## 실행
+```bash
+colcon build --symlink-install --packages-select limo_test
+source install/setup.bash
+```
+
+## 실행: launch 권장
+
+```bash
+ros2 launch limo_test autonomous_drive.launch.py
+```
+
+토픽 이름이 다르면 launch argument로 바꿉니다.
+
+```bash
+ros2 launch limo_test autonomous_drive.launch.py \
+  image_topic:=/camera/color/image_raw \
+  scan_topic:=/scan \
+  cmd_vel_topic:=/cmd_vel
+```
+
+## 실행: ros2 run
 
 워크스페이스와 ROS 환경을 먼저 source 합니다.
 
 ```bash
 source /opt/ros/humble/setup.bash
 source install/setup.bash
-python3 -m limo_test.autonomous_drive --ros-args \
-  --params-file limo_test/autonomous_params.yaml
+ros2 run limo_test autonomous_drive --ros-args \
+  --params-file install/limo_test/share/limo_test/config/autonomous_params.yaml
 ```
 
 토픽 이름이 다르면 실행 시 파라미터로 바꿉니다.
 
 ```bash
-python3 -m limo_test.autonomous_drive --ros-args \
+ros2 run limo_test autonomous_drive --ros-args \
   -p image_topic:=/camera/color/image_raw \
   -p scan_topic:=/scan \
   -p cmd_vel_topic:=/cmd_vel
