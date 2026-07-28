@@ -80,6 +80,13 @@ limo_autonomous_drive:
     side_sector_deg: 100.0
     closest_sample_count: 1
     aeb_distance: 0.20
+    enable_aeb_recovery: true
+    aeb_recovery_clear_distance: 0.32
+    aeb_recovery_reverse_sec: 0.7
+    aeb_recovery_turn_sec: 0.6
+    aeb_recovery_reverse_speed: -0.18
+    aeb_recovery_turn_speed: 0.05
+    aeb_recovery_turn_angular: 0.85
     stop_distance: 0.34
     slow_distance: 0.95
     side_obstacle_distance: 0.34

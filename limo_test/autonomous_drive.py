@@ -164,6 +164,13 @@ class LimoAutonomousDrive(Node):
         self.declare_parameter("side_sector_deg", 100.0)
         self.declare_parameter("closest_sample_count", 1)
         self.declare_parameter("aeb_distance", 0.20)
+        self.declare_parameter("enable_aeb_recovery", True)
+        self.declare_parameter("aeb_recovery_clear_distance", 0.32)
+        self.declare_parameter("aeb_recovery_reverse_sec", 0.7)
+        self.declare_parameter("aeb_recovery_turn_sec", 0.6)
+        self.declare_parameter("aeb_recovery_reverse_speed", -0.18)
+        self.declare_parameter("aeb_recovery_turn_speed", 0.05)
+        self.declare_parameter("aeb_recovery_turn_angular", 0.85)
         self.declare_parameter("stop_distance", 0.34)
         self.declare_parameter("slow_distance", 0.95)
         self.declare_parameter("side_obstacle_distance", 0.34)
@@ -262,6 +269,9 @@ class LimoAutonomousDrive(Node):
         self.last_steering = 0.0
         self.integral = 0.0
         self.prev_time = self.get_clock().now()
+        self.aeb_recovery_active = False
+        self.aeb_recovery_start_sec = 0.0
+        self.aeb_recovery_turn_direction = 1.0
 
         self.get_logger().info(
             "LIMO autonomous drive ready: "
@@ -1009,6 +1019,20 @@ class LimoAutonomousDrive(Node):
             return
 
         lane = self.latest_lane
+        recovery_command = self.aeb_recovery_command(now, scan_ok)
+        if recovery_command is not None:
+            speed, steering, drive_state = recovery_command
+            msg.linear.x = float(speed)
+            msg.angular.z = float(
+                np.clip(steering, -float(self.get_parameter("max_angular").value),
+                        float(self.get_parameter("max_angular").value))
+            )
+            self.cmd_pub.publish(msg)
+            min_confidence = float(self.get_parameter("min_lane_confidence").value)
+            lane_valid = lane is not None and lane.confidence >= min_confidence
+            self.log_drive_status(msg, lane, lane_valid, drive_state, scan_ok)
+            return
+
         dt = max((now - self.prev_time).nanoseconds / 1e9, 1e-3)
         self.prev_time = now
 
@@ -1073,9 +1097,19 @@ class LimoAutonomousDrive(Node):
                 steering = obstacle_steering
                 drive_state = mode
             elif mode == "aeb_stop":
-                speed = obstacle_speed
-                steering = obstacle_steering
-                drive_state = mode
+                if bool(self.get_parameter("enable_aeb_recovery").value):
+                    self.start_aeb_recovery(now, self.latest_scan)
+                    recovery_command = self.aeb_recovery_command(now, scan_ok)
+                    if recovery_command is not None:
+                        speed, steering, drive_state = recovery_command
+                    else:
+                        speed = obstacle_speed
+                        steering = obstacle_steering
+                        drive_state = mode
+                else:
+                    speed = obstacle_speed
+                    steering = obstacle_steering
+                    drive_state = mode
             elif mode == "slow_avoid":
                 speed = min(speed, obstacle_speed)
                 steering += obstacle_steering
@@ -1161,7 +1195,10 @@ class LimoAutonomousDrive(Node):
             speed = float(self.get_parameter("lane_lost_min_speed").value)
 
         max_angular = float(self.get_parameter("max_angular").value)
-        msg.linear.x = float(max(speed, 0.0))
+        if drive_state.startswith("aeb_recovery"):
+            msg.linear.x = float(speed)
+        else:
+            msg.linear.x = float(max(speed, 0.0))
         msg.angular.z = float(np.clip(steering, -max_angular, max_angular))
         self.cmd_pub.publish(msg)
         self.log_drive_status(msg, lane, lane_valid, drive_state, scan_ok)
@@ -1177,6 +1214,75 @@ class LimoAutonomousDrive(Node):
                 )
             except Exception as exc:
                 self.get_logger().warn(f"Failed to publish debug image: {exc}")
+
+    def start_aeb_recovery(self, now, scan: Optional[LaserScan]):
+        if self.aeb_recovery_active:
+            return
+
+        self.aeb_recovery_active = True
+        self.aeb_recovery_start_sec = now.nanoseconds / 1e9
+        self.aeb_recovery_turn_direction = self.open_side_direction(scan)
+        self.integral = 0.0
+        self.get_logger().warn(
+            "AEB recovery: reverse and search open path.",
+            throttle_duration_sec=0.5,
+        )
+
+    def aeb_recovery_command(
+        self,
+        now,
+        scan_ok: bool,
+    ) -> Optional[Tuple[float, float, str]]:
+        if not self.aeb_recovery_active:
+            return None
+
+        elapsed = now.nanoseconds / 1e9 - self.aeb_recovery_start_sec
+        reverse_sec = float(self.get_parameter("aeb_recovery_reverse_sec").value)
+        turn_sec = float(self.get_parameter("aeb_recovery_turn_sec").value)
+
+        if elapsed < reverse_sec:
+            # AEB 직후에는 우선 직선 후진으로 20cm 안전거리에서 벗어납니다.
+            return (
+                float(self.get_parameter("aeb_recovery_reverse_speed").value),
+                0.0,
+                "aeb_recovery_back",
+            )
+
+        if elapsed < reverse_sec + turn_sec:
+            turn_speed = float(self.get_parameter("aeb_recovery_turn_speed").value)
+            turn_angular = float(
+                self.get_parameter("aeb_recovery_turn_angular").value
+            )
+            return (
+                turn_speed,
+                self.aeb_recovery_turn_direction * turn_angular,
+                "aeb_recovery_turn",
+            )
+
+        self.aeb_recovery_active = False
+
+        if scan_ok and self.latest_scan is not None:
+            aeb_angle = self.param_rad("aeb_sector_deg")
+            front = self.sector_min(self.latest_scan, -aeb_angle, aeb_angle)
+            clear_distance = float(
+                self.get_parameter("aeb_recovery_clear_distance").value
+            )
+            if front < clear_distance:
+                # 아직 전방이 너무 가까우면 한 번 더 후진 시퀀스를 시작합니다.
+                self.start_aeb_recovery(now, self.latest_scan)
+                return self.aeb_recovery_command(now, scan_ok)
+
+        return None
+
+    def open_side_direction(self, scan: Optional[LaserScan]) -> float:
+        if scan is None:
+            return 1.0
+
+        front_angle = self.param_rad("front_sector_deg")
+        side_angle = self.param_rad("side_sector_deg")
+        left = self.sector_min(scan, front_angle, side_angle)
+        right = self.sector_min(scan, -side_angle, -front_angle)
+        return 1.0 if left >= right else -1.0
 
     def pid_steering(self, error: float, dt: float) -> float:
         kp = float(self.get_parameter("kp").value)
@@ -1475,7 +1581,7 @@ class LimoAutonomousDrive(Node):
             return
 
         lane_text = "인식" if lane_valid else "미인식"
-        aeb_text = "작동" if drive_state == "aeb_stop" else "미작동"
+        aeb_text = "작동" if drive_state.startswith("aeb") else "미작동"
 
         self.get_logger().info(
             f"차선: {lane_text} | AEB: {aeb_text} | 속도: {msg.linear.x:.2f}m/s",
