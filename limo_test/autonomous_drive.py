@@ -38,6 +38,7 @@ class LaneResult:
     geometry_valid: bool
     road_between_ratio: float
     lane_width_ratio: float
+    camera_valid: bool
 
 
 @dataclass
@@ -47,6 +48,7 @@ class LaneTrack:
     std_ratio: float
     width_ratio: float
     valid: bool
+    points: list
 
 
 class LimoAutonomousDrive(Node):
@@ -85,24 +87,31 @@ class LimoAutonomousDrive(Node):
         self.declare_parameter("kd", 0.18)
         self.declare_parameter("integral_limit", 0.45)
 
-        # 카메라 하단부만 차선 ROI로 사용합니다.
-        # 위쪽 배경/벽/사람 검출을 줄이기 위함입니다.
-        self.declare_parameter("roi_top_ratio", 0.55)
+        # 중간 시야부터 아래까지 보면서
+        # 원근에 따른 차선 폭 변화를 반영합니다.
+        self.declare_parameter("roi_top_ratio", 0.38)
         self.declare_parameter("expected_lane_width_ratio", 0.48)
+        self.declare_parameter("top_lane_width_ratio", 0.22)
+        self.declare_parameter("bottom_lane_width_ratio", 0.62)
+        self.declare_parameter("lookahead_ratio", 0.62)
         self.declare_parameter("single_lane_offset_ratio", 0.24)
         self.declare_parameter("min_lane_area", 180)
         self.declare_parameter("max_lane_area_ratio", 0.18)
         self.declare_parameter("min_lane_confidence", 0.35)
-        self.declare_parameter("lane_search_band_count", 6)
-        self.declare_parameter("lane_search_band_height", 18)
+        self.declare_parameter("lane_search_band_count", 9)
+        self.declare_parameter("lane_search_band_height", 20)
         self.declare_parameter("lane_min_band_pixels", 8)
         self.declare_parameter("min_lane_band_count", 3)
         self.declare_parameter("lane_histogram_margin_ratio", 0.08)
         self.declare_parameter("max_lane_peak_width_ratio", 0.055)
-        self.declare_parameter("max_lane_x_std_ratio", 0.08)
+        self.declare_parameter("max_lane_x_std_ratio", 0.14)
+        self.declare_parameter("max_lane_band_jump_ratio", 0.16)
         self.declare_parameter("min_lane_width_ratio", 0.30)
         self.declare_parameter("max_lane_width_ratio", 0.72)
         self.declare_parameter("max_lane_mask_ratio", 0.16)
+        self.declare_parameter("blank_white_mask_ratio", 0.65)
+        self.declare_parameter("blank_black_road_ratio", 0.90)
+        self.declare_parameter("blank_black_mask_ratio", 0.01)
         self.declare_parameter("black_road_value_max", 95)
         self.declare_parameter("black_road_saturation_min", 0)
         self.declare_parameter("min_road_ratio_for_lane", 0.25)
@@ -143,6 +152,13 @@ class LimoAutonomousDrive(Node):
         self.declare_parameter("tunnel_centering_gain", 0.35)
         self.declare_parameter("low_obstacle_speed", 0.10)
         self.declare_parameter("avoid_gain", 0.85)
+        self.declare_parameter("enable_lidar_slalom", True)
+        self.declare_parameter("slalom_view_deg", 90.0)
+        self.declare_parameter("slalom_obstacle_distance", 0.75)
+        self.declare_parameter("slalom_min_gap_indices", 5)
+        self.declare_parameter("slalom_kp", 1.0)
+        self.declare_parameter("slalom_speed", 0.45)
+        self.declare_parameter("slalom_lane_mix", 0.35)
 
         # 센서 데이터가 오래되면 잘못된 명령을 내리지 않도록 제한합니다.
         self.declare_parameter("image_timeout_sec", 0.7)
@@ -325,9 +341,6 @@ class LimoAutonomousDrive(Node):
             * mask.shape[1]
             * float(self.get_parameter("max_lane_area_ratio").value)
         )
-        expected_lane_width = width * float(
-            self.get_parameter("expected_lane_width_ratio").value
-        )
         single_lane_offset = width * float(
             self.get_parameter("single_lane_offset_ratio").value
         )
@@ -359,6 +372,20 @@ class LimoAutonomousDrive(Node):
         min_width_ratio = float(self.get_parameter("min_lane_width_ratio").value)
         max_width_ratio = float(self.get_parameter("max_lane_width_ratio").value)
         max_mask_ratio = float(self.get_parameter("max_lane_mask_ratio").value)
+        blank_white_ratio = float(self.get_parameter("blank_white_mask_ratio").value)
+        blank_black_road_ratio = float(
+            self.get_parameter("blank_black_road_ratio").value
+        )
+        blank_black_mask_ratio = float(
+            self.get_parameter("blank_black_mask_ratio").value
+        )
+        camera_valid = not (
+            mask_ratio >= blank_white_ratio
+            or (
+                road_ratio >= blank_black_road_ratio
+                and mask_ratio <= blank_black_mask_ratio
+            )
+        )
 
         # 너무 큰 흰색 배경이 들어오는지
         # 로그로 확인하기 위한 보조 카운트입니다.
@@ -376,19 +403,27 @@ class LimoAutonomousDrive(Node):
         lane_width_ratio = 0.0
         if left_x is not None and right_x is not None:
             # 양쪽 차선이 보이면 두 차선의 중간을 주행 중심으로 봅니다.
-            lane_width = max(right_x - left_x, 1.0)
-            lane_width_ratio = lane_width / width
             road_between_ratio = self.road_between_lanes_ratio(
                 road_mask,
                 left_x,
                 right_x,
             )
+            lane_center, lookahead_width_ratio = self.perspective_lane_center(
+                left_track,
+                right_track,
+                image_center,
+                width,
+            )
+            lane_width_ratio = lookahead_width_ratio
             width_valid = min_width_ratio <= lane_width_ratio <= max_width_ratio
             mask_valid = mask_ratio <= max_mask_ratio
             geometry_valid = width_valid and mask_valid
-            lane_center = (left_x + right_x) / 2.0
+            expected_lane_width = width * self.expected_lane_width_ratio_at(
+                float(self.get_parameter("lookahead_ratio").value)
+            )
+            lane_width = lane_width_ratio * width
             width_score = 1.0 - min(
-                abs(lane_width - expected_lane_width) / expected_lane_width,
+                abs(lane_width - expected_lane_width) / max(expected_lane_width, 1.0),
                 1.0,
             )
             count_score = min((left_count + right_count) / 8.0, 1.0)
@@ -417,7 +452,9 @@ class LimoAutonomousDrive(Node):
             and road_ratio >= reflected_road_ratio
             and road_between_ratio >= reflected_road_between_ratio
         )
-        if not road_valid:
+        if not camera_valid:
+            confidence = 0.0
+        elif not road_valid:
             # 검은 도로가 충분히 보이지 않으면 흰 책상/흰 벽을
             # 차선으로 오인했을 가능성이 큽니다.
             confidence = 0.0
@@ -440,6 +477,7 @@ class LimoAutonomousDrive(Node):
             geometry_valid,
             road_between_ratio,
             lane_width_ratio,
+            camera_valid,
         )
 
     def find_lane_x_from_bands(
@@ -464,10 +502,16 @@ class LimoAutonomousDrive(Node):
         x_start = max(0, x_start + margin)
         x_end = min(mask.shape[1], x_end - margin)
         if x_end <= x_start:
-            return LaneTrack(None, 0, 1.0, 1.0, False)
+            return LaneTrack(None, 0, 1.0, 1.0, False, [])
 
         weighted_positions = []
         peak_widths = []
+        points = []
+        previous_x = None
+        max_jump = (
+            mask.shape[1]
+            * float(self.get_parameter("max_lane_band_jump_ratio").value)
+        )
         height = mask.shape[0]
         for band in range(band_count):
             y_end = height - band * band_height
@@ -479,18 +523,34 @@ class LimoAutonomousDrive(Node):
             peak_pixels = int(np.max(histogram)) if histogram.size else 0
             if peak_pixels < min_pixels:
                 continue
-            peak_index = int(np.argmax(histogram))
+            peak_indices = self.histogram_peaks(histogram, min_pixels)
+            if not peak_indices:
+                continue
+            if previous_x is None:
+                peak_index = max(peak_indices, key=lambda idx: histogram[idx])
+            else:
+                local_previous = previous_x - x_start
+                peak_index = min(
+                    peak_indices,
+                    key=lambda idx: abs(idx - local_previous),
+                )
+                if abs((peak_index + x_start) - previous_x) > max_jump:
+                    continue
             active_columns = histogram >= max(1, int(peak_pixels * 0.45))
             peak_width = self.contiguous_width(active_columns, peak_index)
             if peak_width > max_peak_width:
                 continue
             peak_x = peak_index + x_start
+            previous_x = peak_x
             weight = float(band_count - band)
             weighted_positions.append((peak_x, weight))
             peak_widths.append(peak_width)
+            y_center = (y_start + y_end) / 2.0
+            y_ratio = y_center / max(height, 1)
+            points.append((peak_x, y_ratio))
 
         if not weighted_positions:
-            return LaneTrack(None, 0, 1.0, 1.0, False)
+            return LaneTrack(None, 0, 1.0, 1.0, False, [])
 
         weighted_sum = sum(x * weight for x, weight in weighted_positions)
         total_weight = sum(weight for _, weight in weighted_positions)
@@ -499,7 +559,63 @@ class LimoAutonomousDrive(Node):
         std_ratio = float(np.std(positions) / max(mask.shape[1], 1))
         width_ratio = float(np.mean(peak_widths) / max(mask.shape[1], 1))
         valid = len(weighted_positions) >= min_band_count and std_ratio <= max_std_ratio
-        return LaneTrack(x, len(weighted_positions), std_ratio, width_ratio, valid)
+        return LaneTrack(x, len(weighted_positions), std_ratio, width_ratio, valid, points)
+
+    def histogram_peaks(self, histogram, min_pixels: int):
+        peaks = []
+        if histogram.size < 3:
+            return peaks
+
+        for index in range(1, len(histogram) - 1):
+            value = histogram[index]
+            if value < min_pixels:
+                continue
+            if value >= histogram[index - 1] and value >= histogram[index + 1]:
+                peaks.append(index)
+
+        return peaks
+
+    def perspective_lane_center(
+        self,
+        left_track: LaneTrack,
+        right_track: LaneTrack,
+        image_center: float,
+        width: int,
+    ) -> Tuple[float, float]:
+        lookahead_ratio = float(self.get_parameter("lookahead_ratio").value)
+        left_x = self.track_x_at(left_track, lookahead_ratio)
+        right_x = self.track_x_at(right_track, lookahead_ratio)
+
+        if left_x is not None and right_x is not None:
+            lane_width = max(right_x - left_x, 1.0)
+            return (left_x + right_x) / 2.0, lane_width / width
+
+        expected_width = width * self.expected_lane_width_ratio_at(lookahead_ratio)
+        if left_x is not None:
+            return left_x + expected_width / 2.0, expected_width / width
+        if right_x is not None:
+            return right_x - expected_width / 2.0, expected_width / width
+        return image_center, 0.0
+
+    def track_x_at(self, track: LaneTrack, y_ratio: float) -> Optional[float]:
+        if not track.points:
+            return track.x
+
+        points = sorted(track.points, key=lambda point: point[1])
+        if len(points) == 1:
+            return points[0][0]
+
+        ys = np.array([point[1] for point in points])
+        xs = np.array([point[0] for point in points])
+        degree = 2 if len(points) >= 4 else 1
+        coefficients = np.polyfit(ys, xs, degree)
+        return float(np.polyval(coefficients, y_ratio))
+
+    def expected_lane_width_ratio_at(self, y_ratio: float) -> float:
+        top_width = float(self.get_parameter("top_lane_width_ratio").value)
+        bottom_width = float(self.get_parameter("bottom_lane_width_ratio").value)
+        y_ratio = float(np.clip(y_ratio, 0.0, 1.0))
+        return top_width + (bottom_width - top_width) * y_ratio
 
     def contiguous_width(self, active_columns, peak_index: int) -> int:
         left = peak_index
@@ -593,6 +709,18 @@ class LimoAutonomousDrive(Node):
             steering = self.pid_steering(lane.center_error, dt)
             speed = self.speed_from_lane(lane, steering)
             self.last_steering = steering
+        elif (
+            lane is not None
+            and not lane.camera_valid
+        ):
+            speed = 0.0
+            steering = 0.0
+            self.integral = 0.0
+            drive_state = "camera_invalid"
+            self.get_logger().warn(
+                "Camera image is invalid for driving. Stopping.",
+                throttle_duration_sec=1.0,
+            )
         elif bool(self.get_parameter("enable_lane_lost_drive").value):
             # 차선이 안 보이는 바닥에서는 라이다 fallback을 씁니다.
             # 라이다가 정상일 때는 열린 방향으로 가고,
@@ -644,6 +772,13 @@ class LimoAutonomousDrive(Node):
                 drive_state = mode
             elif mode == "tunnel_center":
                 steering += obstacle_steering
+                drive_state = mode
+            elif mode == "slalom_gap":
+                speed = min(speed, obstacle_speed)
+                steering = (
+                    float(self.get_parameter("slalom_lane_mix").value) * steering
+                    + obstacle_steering
+                )
                 drive_state = mode
         else:
             # 라이다가 잠시 끊겼을 때 완전 정지 대신
@@ -793,6 +928,11 @@ class LimoAutonomousDrive(Node):
             turn_direction = 1.0 if left > right else -1.0
             return 0.0, turn_direction * min(1.0, avoid_gain + 0.25), "stop_turn"
 
+        if bool(self.get_parameter("enable_lidar_slalom").value):
+            slalom = self.slalom_gap_command(scan)
+            if slalom is not None:
+                return slalom
+
         if front < slow_distance:
             # 전방 여유가 작으면 좌우 공간 차이만큼 회피 조향을 더합니다.
             clearance_delta = np.clip((left - right) / slow_distance, -1.0, 1.0)
@@ -822,6 +962,62 @@ class LimoAutonomousDrive(Node):
             return caution_speed, avoid_gain * clearance_delta, "side_avoid"
 
         return 0.0, 0.0, "clear"
+
+    def slalom_gap_command(
+        self,
+        scan: LaserScan,
+    ) -> Optional[Tuple[float, float, str]]:
+        view_angle = self.param_rad("slalom_view_deg")
+        obstacle_distance = float(
+            self.get_parameter("slalom_obstacle_distance").value
+        )
+        min_gap = int(self.get_parameter("slalom_min_gap_indices").value)
+        kp = float(self.get_parameter("slalom_kp").value)
+        speed = float(self.get_parameter("slalom_speed").value)
+
+        candidates = []
+        obstacle_indices = []
+        for i, value in enumerate(scan.ranges):
+            angle = scan.angle_min + i * scan.angle_increment
+            if abs(angle) > view_angle:
+                continue
+            if not math.isfinite(value):
+                continue
+            if value < scan.range_min or value > scan.range_max:
+                continue
+
+            candidates.append((i, angle))
+            if value < obstacle_distance:
+                obstacle_indices.append(i)
+
+        if not obstacle_indices or not candidates:
+            return None
+
+        first_index = candidates[0][0]
+        last_index = candidates[-1][0]
+        gaps = []
+
+        right_space = obstacle_indices[0] - first_index
+        if right_space >= min_gap:
+            gaps.append((right_space, first_index, obstacle_indices[0]))
+
+        for left_obs, right_obs in zip(obstacle_indices, obstacle_indices[1:]):
+            gap = right_obs - left_obs
+            if gap >= min_gap:
+                gaps.append((gap, left_obs, right_obs))
+
+        left_space = last_index - obstacle_indices[-1]
+        if left_space >= min_gap:
+            gaps.append((left_space, obstacle_indices[-1], last_index))
+
+        if not gaps:
+            return None
+
+        _, gap_start, gap_end = max(gaps, key=lambda item: item[0])
+        target_index = (gap_start + gap_end) // 2
+        target_angle = scan.angle_min + target_index * scan.angle_increment
+        steering = float(np.clip(kp * target_angle, -1.0, 1.0))
+        return speed, steering, "slalom_gap"
 
     def sector_min(
         self,
@@ -887,6 +1083,7 @@ class LimoAutonomousDrive(Node):
             f"mask={lane.mask_ratio * 100.0:.2f}% "
             f"road={lane.road_ratio * 100.0:.2f}% "
             f"road_ok={lane.road_valid} "
+            f"cam_ok={lane.camera_valid} "
             f"geom_ok={lane.geometry_valid} "
             f"between={lane.road_between_ratio * 100.0:.2f}% "
             f"width={lane.lane_width_ratio:.2f} "
