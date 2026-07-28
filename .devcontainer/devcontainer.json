@@ -1,0 +1,18 @@
+{
+  "name": "LIMO ROS 2 Humble",
+  "dockerComposeFile": "../compose.yaml",
+  "service": "limo_dev",
+  "workspaceFolder": "/workspaces/limo_ws",
+  "shutdownAction": "stopCompose",
+  "remoteUser": "root",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-iot.vscode-ros",
+        "ms-python.python",
+        "ms-vscode.cpptools",
+        "twxs.cmake"
+      ]
+    }
+  }
+}
