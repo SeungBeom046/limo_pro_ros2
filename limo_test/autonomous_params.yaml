@@ -1,6 +1,6 @@
 limo_autonomous_drive:
   ros__parameters:
-    image_topic: /camera/image_raw
+    image_topic: /camera/color/image_raw
     scan_topic: /scan
     cmd_vel_topic: /cmd_vel
     debug_image_topic: /limo/autonomy/debug_image
