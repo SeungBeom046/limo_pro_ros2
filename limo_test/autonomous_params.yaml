@@ -7,11 +7,13 @@ limo_autonomous_drive:
     publish_debug_image: true
     publish_drive_log: true
     drive_log_period_sec: 0.5
+    publish_lane_log: false
+    lane_log_period_sec: 0.5
 
     control_rate_hz: 20.0
-    max_speed: 0.45
-    min_speed: 0.12
-    caution_speed: 0.18
+    max_speed: 0.55
+    min_speed: 0.15
+    caution_speed: 0.22
     max_angular: 1.35
 
     kp: 1.45
@@ -24,16 +26,40 @@ limo_autonomous_drive:
     single_lane_offset_ratio: 0.24
     min_lane_area: 180
     max_lane_area_ratio: 0.18
-    min_lane_confidence: 0.05
+    min_lane_confidence: 0.12
+    lane_search_band_count: 6
+    lane_search_band_height: 18
+    lane_min_band_pixels: 8
+    lane_histogram_margin_ratio: 0.08
+    black_road_value_max: 95
+    black_road_saturation_min: 0
+    min_road_ratio_for_lane: 0.25
+    camera_obstacle_roi_top_ratio: 0.72
+    camera_obstacle_center_width_ratio: 0.46
+    camera_obstacle_min_ratio: 0.06
 
     enable_lane_lost_drive: true
-    lane_lost_speed: 0.16
+    lane_lost_speed: 0.18
     lane_lost_steering_decay: 0.45
+    lane_lost_use_lidar: true
+    lane_lost_lidar_angle_deg: 95.0
+    lane_lost_clearance_distance: 1.20
+    lane_lost_open_distance: 2.50
+    lane_lost_gap_gain: 0.85
+    lane_lost_obstacle_gain: 0.75
 
-    front_sector_deg: 28.0
-    side_sector_deg: 55.0
-    stop_distance: 0.42
-    slow_distance: 0.85
+    aeb_sector_deg: 35.0
+    front_sector_deg: 45.0
+    side_sector_deg: 100.0
+    closest_sample_count: 1
+    aeb_distance: 0.20
+    stop_distance: 0.48
+    slow_distance: 1.20
+    side_obstacle_distance: 0.34
+    tunnel_side_distance: 0.70
+    tunnel_balance_tolerance: 0.28
+    tunnel_centering_gain: 0.35
+    low_obstacle_speed: 0.10
     avoid_gain: 0.85
 
     image_timeout_sec: 0.7
