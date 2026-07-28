@@ -7,6 +7,7 @@ import numpy as np
 import rclpy
 from geometry_msgs.msg import Twist
 from rclpy.node import Node
+from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import Image, LaserScan
 
 try:
@@ -91,8 +92,18 @@ class LimoAutonomousDrive(Node):
 
         # 카메라와 라이다 콜백은 최신 센서 상태만 저장하고,
         # 실제 주행 명령 계산은 control_loop에서 주기적으로 수행합니다.
-        self.create_subscription(Image, self.image_topic, self.image_callback, 10)
-        self.create_subscription(LaserScan, self.scan_topic, self.scan_callback, 10)
+        self.create_subscription(
+            Image,
+            self.image_topic,
+            self.image_callback,
+            qos_profile_sensor_data,
+        )
+        self.create_subscription(
+            LaserScan,
+            self.scan_topic,
+            self.scan_callback,
+            qos_profile_sensor_data,
+        )
 
         rate = float(self.get_parameter("control_rate_hz").value)
         self.timer = self.create_timer(1.0 / rate, self.control_loop)
