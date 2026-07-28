@@ -19,6 +19,7 @@ ros2 launch limo_test autonomous_drive.launch.py
 ```bash
 ros2 launch limo_test autonomous_drive.launch.py \
   image_topic:=/camera/color/image_raw \
+  depth_topic:=/camera/depth/image_raw \
   scan_topic:=/scan \
   cmd_vel_topic:=/cmd_vel
 ```
@@ -26,7 +27,7 @@ ros2 launch limo_test autonomous_drive.launch.py \
 줄바꿈이 헷갈리면 한 줄로 실행하는 것이 가장 안전합니다.
 
 ```bash
-ros2 launch limo_test autonomous_drive.launch.py image_topic:=/camera/color/image_raw scan_topic:=/scan cmd_vel_topic:=/cmd_vel
+ros2 launch limo_test autonomous_drive.launch.py image_topic:=/camera/color/image_raw depth_topic:=/camera/depth/image_raw scan_topic:=/scan cmd_vel_topic:=/cmd_vel
 ```
 
 ## 실행: ros2 run
@@ -62,6 +63,7 @@ ros2 run limo_test autonomous_drive --ros-args --params-file ~/wego_ws/src/limo_
 ## 사용하는 토픽
 
 - Subscribe: `/camera/color/image_raw` (`sensor_msgs/Image`)
+- Subscribe: `/camera/depth/image_raw` (`sensor_msgs/Image`)
 - Subscribe: `/scan` (`sensor_msgs/LaserScan`)
 - Publish: `/cmd_vel` (`geometry_msgs/Twist`)
 - Publish: `/limo/autonomy/debug_image` (`sensor_msgs/Image`)
@@ -86,8 +88,8 @@ ros2 run limo_test autonomous_drive --ros-args --params-file ~/wego_ws/src/limo_
    우측 바깥 중 가장 넓은 gap을 골라 `slalom_gap`으로 통과합니다.
 11. 책상 다리처럼 얇은 장애물은 섹터 퍼센타일 대신 가까운 beam 값을 사용해
    감지합니다.
-12. 낮은 턱처럼 라이다가 놓칠 수 있는 장애물은 카메라 하단 중앙의 비검정 영역으로
-   보조 감지해 감속합니다.
+12. 낮은 턱처럼 라이다가 놓칠 수 있는 장애물은 depth 카메라 하단 ROI로 감지해
+   가까우면 정지하고, 조금 멀면 감속하며 빈 쪽으로 조향합니다.
 13. 차선이 안 보이면 `lane_lost_lidar` fallback으로 전환해 라이다 기준 열린
    방향을 찾고, 가까운 물체 반대쪽으로 조향합니다.
 14. 카메라 또는 라이다 데이터가 끊기면 속도를 낮추거나 정지합니다.

@@ -18,6 +18,7 @@ def generate_launch_description():
 
     params_file = LaunchConfiguration("params_file")
     image_topic = LaunchConfiguration("image_topic")
+    depth_topic = LaunchConfiguration("depth_topic")
     scan_topic = LaunchConfiguration("scan_topic")
     cmd_vel_topic = LaunchConfiguration("cmd_vel_topic")
 
@@ -39,6 +40,11 @@ def generate_launch_description():
                 description="2D lidar LaserScan topic.",
             ),
             DeclareLaunchArgument(
+                "depth_topic",
+                default_value="/camera/depth/image_raw",
+                description="Depth image topic.",
+            ),
+            DeclareLaunchArgument(
                 "cmd_vel_topic",
                 default_value="/cmd_vel",
                 description="Velocity command topic.",
@@ -52,6 +58,7 @@ def generate_launch_description():
                     params_file,
                     {
                         "image_topic": image_topic,
+                        "depth_topic": depth_topic,
                         "scan_topic": scan_topic,
                         "cmd_vel_topic": cmd_vel_topic,
                     },

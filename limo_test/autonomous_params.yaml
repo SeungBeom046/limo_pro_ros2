@@ -1,6 +1,7 @@
 limo_autonomous_drive:
   ros__parameters:
     image_topic: /camera/color/image_raw
+    depth_topic: /camera/depth/image_raw
     scan_topic: /scan
     cmd_vel_topic: /cmd_vel
     debug_image_topic: /limo/autonomy/debug_image
@@ -87,6 +88,17 @@ limo_autonomous_drive:
     slalom_kp: 1.0
     slalom_speed: 0.45
     slalom_lane_mix: 0.35
+    enable_depth_obstacle: true
+    depth_timeout_sec: 0.7
+    depth_near_distance: 0.45
+    depth_slow_distance: 0.75
+    depth_stop_ratio: 0.12
+    depth_slow_ratio: 0.06
+    depth_roi_top_ratio: 0.58
+    depth_roi_bottom_ratio: 0.95
+    depth_center_width_ratio: 0.46
+    depth_side_width_ratio: 0.27
+    depth_avoid_gain: 0.65
 
     image_timeout_sec: 0.7
     scan_timeout_sec: 0.7

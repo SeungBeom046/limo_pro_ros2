@@ -60,6 +60,7 @@ class LimoAutonomousDrive(Node):
         # 토픽 이름은 LIMO 세팅마다 조금씩 다를 수 있어
         # 파라미터로 열어둡니다.
         self.declare_parameter("image_topic", "/camera/color/image_raw")
+        self.declare_parameter("depth_topic", "/camera/depth/image_raw")
         self.declare_parameter("scan_topic", "/scan")
         self.declare_parameter("cmd_vel_topic", "/cmd_vel")
         self.declare_parameter("debug_image_topic", "/limo/autonomy/debug_image")
@@ -159,6 +160,17 @@ class LimoAutonomousDrive(Node):
         self.declare_parameter("slalom_kp", 1.0)
         self.declare_parameter("slalom_speed", 0.45)
         self.declare_parameter("slalom_lane_mix", 0.35)
+        self.declare_parameter("enable_depth_obstacle", True)
+        self.declare_parameter("depth_timeout_sec", 0.7)
+        self.declare_parameter("depth_near_distance", 0.45)
+        self.declare_parameter("depth_slow_distance", 0.75)
+        self.declare_parameter("depth_stop_ratio", 0.12)
+        self.declare_parameter("depth_slow_ratio", 0.06)
+        self.declare_parameter("depth_roi_top_ratio", 0.58)
+        self.declare_parameter("depth_roi_bottom_ratio", 0.95)
+        self.declare_parameter("depth_center_width_ratio", 0.46)
+        self.declare_parameter("depth_side_width_ratio", 0.27)
+        self.declare_parameter("depth_avoid_gain", 0.65)
 
         # 센서 데이터가 오래되면 잘못된 명령을 내리지 않도록 제한합니다.
         self.declare_parameter("image_timeout_sec", 0.7)
@@ -171,6 +183,7 @@ class LimoAutonomousDrive(Node):
             )
 
         self.image_topic = self.get_parameter("image_topic").value
+        self.depth_topic = self.get_parameter("depth_topic").value
         self.scan_topic = self.get_parameter("scan_topic").value
         self.cmd_vel_topic = self.get_parameter("cmd_vel_topic").value
         self.debug_image_topic = self.get_parameter("debug_image_topic").value
@@ -187,6 +200,12 @@ class LimoAutonomousDrive(Node):
             qos_profile_sensor_data,
         )
         self.create_subscription(
+            Image,
+            self.depth_topic,
+            self.depth_callback,
+            qos_profile_sensor_data,
+        )
+        self.create_subscription(
             LaserScan,
             self.scan_topic,
             self.scan_callback,
@@ -198,6 +217,7 @@ class LimoAutonomousDrive(Node):
 
         self.latest_lane: Optional[LaneResult] = None
         self.latest_scan: Optional[LaserScan] = None
+        self.latest_depth_obstacle = (False, False, 0.0, 0.0)
         self.latest_debug_image = None
         self.last_obstacle_distances = (
             float("inf"),
@@ -206,6 +226,7 @@ class LimoAutonomousDrive(Node):
             float("inf"),
         )
         self.last_image_time = None
+        self.last_depth_time = None
         self.last_scan_time = None
 
         self.prev_error = 0.0
@@ -215,7 +236,8 @@ class LimoAutonomousDrive(Node):
 
         self.get_logger().info(
             "LIMO autonomous drive ready: "
-            f"image={self.image_topic}, scan={self.scan_topic}, "
+            f"image={self.image_topic}, depth={self.depth_topic}, "
+            f"scan={self.scan_topic}, "
             f"cmd={self.cmd_vel_topic}"
         )
 
@@ -235,6 +257,19 @@ class LimoAutonomousDrive(Node):
     def scan_callback(self, msg: LaserScan):
         self.latest_scan = msg
         self.last_scan_time = self.get_clock().now()
+
+    def depth_callback(self, msg: Image):
+        if self.bridge is None:
+            return
+
+        try:
+            depth = self.bridge.imgmsg_to_cv2(msg, desired_encoding="passthrough")
+        except Exception as exc:
+            self.get_logger().warn(f"Failed to convert depth image: {exc}")
+            return
+
+        self.latest_depth_obstacle = self.detect_depth_obstacle(depth)
+        self.last_depth_time = self.get_clock().now()
 
     def detect_lane(self, frame) -> Tuple[LaneResult, np.ndarray]:
         height, width = frame.shape[:2]
@@ -326,6 +361,79 @@ class LimoAutonomousDrive(Node):
         ratio = float(cv2.countNonZero(obstacle_mask)) / float(obstacle_mask.size)
         threshold = float(self.get_parameter("camera_obstacle_min_ratio").value)
         return ratio, ratio >= threshold
+
+    def detect_depth_obstacle(self, depth) -> Tuple[bool, bool, float, float]:
+        depth_m = self.depth_to_meters(depth)
+        if depth_m is None:
+            return False, False, 0.0, 0.0
+
+        height, width = depth_m.shape[:2]
+        top = int(height * float(self.get_parameter("depth_roi_top_ratio").value))
+        bottom = int(
+            height * float(self.get_parameter("depth_roi_bottom_ratio").value)
+        )
+        center_width = int(
+            width * float(self.get_parameter("depth_center_width_ratio").value)
+        )
+        side_width = int(
+            width * float(self.get_parameter("depth_side_width_ratio").value)
+        )
+        center_left = max(0, (width - center_width) // 2)
+        center_right = min(width, center_left + center_width)
+
+        center_roi = depth_m[top:bottom, center_left:center_right]
+        left_roi = depth_m[top:bottom, 0:side_width]
+        right_roi = depth_m[top:bottom, width - side_width:width]
+
+        near_distance = float(self.get_parameter("depth_near_distance").value)
+        slow_distance = float(self.get_parameter("depth_slow_distance").value)
+        stop_ratio_threshold = float(self.get_parameter("depth_stop_ratio").value)
+        slow_ratio_threshold = float(self.get_parameter("depth_slow_ratio").value)
+
+        stop_ratio = self.depth_close_ratio(center_roi, near_distance)
+        slow_ratio = self.depth_close_ratio(center_roi, slow_distance)
+        left_clearance = self.depth_clearance(left_roi)
+        right_clearance = self.depth_clearance(right_roi)
+        clearance_delta = np.clip(
+            (left_clearance - right_clearance) / max(slow_distance, 1e-3),
+            -1.0,
+            1.0,
+        )
+
+        stop = stop_ratio >= stop_ratio_threshold
+        slow = slow_ratio >= slow_ratio_threshold
+        return stop, slow, float(clearance_delta), float(slow_ratio)
+
+    def depth_to_meters(self, depth):
+        depth = np.asarray(depth)
+        if depth.ndim == 3:
+            depth = depth[:, :, 0]
+
+        if np.issubdtype(depth.dtype, np.integer):
+            depth_m = depth.astype(np.float32) * 0.001
+        else:
+            depth_m = depth.astype(np.float32)
+
+        depth_m[~np.isfinite(depth_m)] = 0.0
+        depth_m[depth_m <= 0.05] = 0.0
+        return depth_m
+
+    def depth_close_ratio(self, roi, threshold: float) -> float:
+        if roi.size == 0:
+            return 0.0
+        valid = roi > 0.05
+        if not np.any(valid):
+            return 0.0
+        close = np.logical_and(valid, roi < threshold)
+        return float(np.count_nonzero(close)) / float(np.count_nonzero(valid))
+
+    def depth_clearance(self, roi) -> float:
+        if roi.size == 0:
+            return 0.0
+        valid = roi[roi > 0.05]
+        if valid.size == 0:
+            return 0.0
+        return float(np.percentile(valid, 20))
 
     def mask_to_lane_result(
         self,
@@ -689,6 +797,7 @@ class LimoAutonomousDrive(Node):
         now = self.get_clock().now()
         image_ok = self.is_recent(self.last_image_time, "image_timeout_sec")
         scan_ok = self.is_recent(self.last_scan_time, "scan_timeout_sec")
+        depth_ok = self.is_recent(self.last_depth_time, "depth_timeout_sec")
 
         msg = Twist()
         # 카메라가 없으면 차선 기반 주행을 할 수 없으므로
@@ -797,6 +906,29 @@ class LimoAutonomousDrive(Node):
             speed = min(speed, float(self.get_parameter("low_obstacle_speed").value))
             if drive_state == "lane_follow":
                 drive_state = "camera_low_obstacle"
+
+        if (
+            bool(self.get_parameter("enable_depth_obstacle").value)
+            and depth_ok
+            and speed > 0.0
+        ):
+            depth_stop, depth_slow, depth_delta, _depth_ratio = (
+                self.latest_depth_obstacle
+            )
+            if depth_stop:
+                speed = 0.0
+                steering = 0.0
+                drive_state = "depth_stop"
+            elif depth_slow:
+                speed = min(
+                    speed,
+                    float(self.get_parameter("low_obstacle_speed").value),
+                )
+                steering += (
+                    float(self.get_parameter("depth_avoid_gain").value)
+                    * depth_delta
+                )
+                drive_state = "depth_slow"
 
         max_angular = float(self.get_parameter("max_angular").value)
         msg.linear.x = float(max(speed, 0.0))
