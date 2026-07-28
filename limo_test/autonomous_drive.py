@@ -59,7 +59,7 @@ class LimoAutonomousDrive(Node):
         # 장애물이나 차선 신뢰도에 따라 아래에서 자동으로 줄입니다.
         self.declare_parameter("control_rate_hz", 20.0)
         self.declare_parameter("max_speed", 0.55)
-        self.declare_parameter("min_speed", 0.15)
+        self.declare_parameter("min_speed", 0.18)
         self.declare_parameter("caution_speed", 0.22)
         self.declare_parameter("max_angular", 1.35)
 
@@ -95,7 +95,8 @@ class LimoAutonomousDrive(Node):
         # 라이다가 안전하면 저속으로 전진하고,
         # 가까운 장애물은 기존 회피 로직을 씁니다.
         self.declare_parameter("enable_lane_lost_drive", True)
-        self.declare_parameter("lane_lost_speed", 0.18)
+        self.declare_parameter("lane_lost_speed", 0.28)
+        self.declare_parameter("lane_lost_min_speed", 0.22)
         self.declare_parameter("lane_lost_steering_decay", 0.45)
         self.declare_parameter("lane_lost_use_lidar", True)
         self.declare_parameter("lane_lost_lidar_angle_deg", 95.0)
@@ -111,8 +112,8 @@ class LimoAutonomousDrive(Node):
         self.declare_parameter("side_sector_deg", 100.0)
         self.declare_parameter("closest_sample_count", 1)
         self.declare_parameter("aeb_distance", 0.20)
-        self.declare_parameter("stop_distance", 0.48)
-        self.declare_parameter("slow_distance", 1.20)
+        self.declare_parameter("stop_distance", 0.34)
+        self.declare_parameter("slow_distance", 0.95)
         self.declare_parameter("side_obstacle_distance", 0.34)
         self.declare_parameter("tunnel_side_distance", 0.70)
         self.declare_parameter("tunnel_balance_tolerance", 0.28)
@@ -541,9 +542,14 @@ class LimoAutonomousDrive(Node):
             speed = min(speed, float(self.get_parameter("caution_speed").value))
             drive_state = "scan_timeout"
 
-        if lane is not None and lane.camera_obstacle and speed > 0.0:
+        if (
+            lane is not None
+            and lane.road_valid
+            and lane.camera_obstacle
+            and speed > 0.0
+        ):
             # 낮은 턱처럼 라이다가 놓칠 수 있는 물체를
-            # 카메라 하단 중앙에서 발견하면 우선 감속합니다.
+            # 검은 트랙 위 카메라 하단 중앙에서 발견하면 우선 감속합니다.
             speed = min(speed, float(self.get_parameter("low_obstacle_speed").value))
             if drive_state == "lane_follow":
                 drive_state = "camera_low_obstacle"
@@ -593,6 +599,7 @@ class LimoAutonomousDrive(Node):
         gap_gain = float(self.get_parameter("lane_lost_gap_gain").value)
         obstacle_gain = float(self.get_parameter("lane_lost_obstacle_gain").value)
         base_speed = float(self.get_parameter("lane_lost_speed").value)
+        min_fallback_speed = float(self.get_parameter("lane_lost_min_speed").value)
 
         best_score = -float("inf")
         best_angle = 0.0
@@ -630,10 +637,7 @@ class LimoAutonomousDrive(Node):
         steering = float(np.clip(gap_steering + obstacle_steering, -1.0, 1.0))
 
         turn_factor = 1.0 - min(abs(steering), 0.65)
-        speed = max(
-            float(self.get_parameter("min_speed").value),
-            base_speed * turn_factor,
-        )
+        speed = max(min_fallback_speed, base_speed * turn_factor)
         return speed, steering
 
     def obstacle_command(self, scan: LaserScan) -> Tuple[float, float, str]:

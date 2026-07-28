@@ -12,7 +12,7 @@ limo_autonomous_drive:
 
     control_rate_hz: 20.0
     max_speed: 0.55
-    min_speed: 0.15
+    min_speed: 0.18
     caution_speed: 0.22
     max_angular: 1.35
 
@@ -39,7 +39,8 @@ limo_autonomous_drive:
     camera_obstacle_min_ratio: 0.06
 
     enable_lane_lost_drive: true
-    lane_lost_speed: 0.18
+    lane_lost_speed: 0.28
+    lane_lost_min_speed: 0.22
     lane_lost_steering_decay: 0.45
     lane_lost_use_lidar: true
     lane_lost_lidar_angle_deg: 95.0
@@ -53,8 +54,8 @@ limo_autonomous_drive:
     side_sector_deg: 100.0
     closest_sample_count: 1
     aeb_distance: 0.20
-    stop_distance: 0.48
-    slow_distance: 1.20
+    stop_distance: 0.34
+    slow_distance: 0.95
     side_obstacle_distance: 0.34
     tunnel_side_distance: 0.70
     tunnel_balance_tolerance: 0.28

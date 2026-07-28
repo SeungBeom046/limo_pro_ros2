@@ -101,7 +101,8 @@ ros2 run limo_test autonomous_drive --ros-args --params-file ~/wego_ws/src/limo_
    `closest_sample_count`를 `1`로 유지합니다.
 8. AEB가 너무 민감하면 `aeb_sector_deg`를 줄이고, 너무 늦으면 `aeb_distance`를
    `0.25` 정도로 키웁니다.
-9. 차선이 없는 바닥에서 너무 빠르면 `lane_lost_speed`를 낮춥니다. 라이다
+9. 차선이 없는 바닥에서 안 굴러가면 `lane_lost_speed`, `lane_lost_min_speed`를
+   올립니다. 너무 빠르면 `lane_lost_speed`를 낮춥니다. 라이다
    fallback이 너무 크게 꺾으면 `lane_lost_gap_gain`, `lane_lost_obstacle_gain`을
    낮춥니다.
 10. 실차 첫 주행이 불안하면 `max_speed: 0.30` 정도로 낮춘 뒤 점진적으로 올립니다.
