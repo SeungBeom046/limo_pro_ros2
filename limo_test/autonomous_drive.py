@@ -35,6 +35,18 @@ class LaneResult:
     camera_obstacle_ratio: float
     camera_obstacle: bool
     road_valid: bool
+    geometry_valid: bool
+    road_between_ratio: float
+    lane_width_ratio: float
+
+
+@dataclass
+class LaneTrack:
+    x: Optional[float]
+    count: int
+    std_ratio: float
+    width_ratio: float
+    valid: bool
 
 
 class LimoAutonomousDrive(Node):
@@ -58,9 +70,11 @@ class LimoAutonomousDrive(Node):
         # 속도는 실차 주행 기준으로 너무 답답하지 않게 잡되,
         # 장애물이나 차선 신뢰도에 따라 아래에서 자동으로 줄입니다.
         self.declare_parameter("control_rate_hz", 20.0)
-        self.declare_parameter("max_speed", 0.55)
+        self.declare_parameter("max_speed", 1.20)
         self.declare_parameter("min_speed", 0.18)
-        self.declare_parameter("caution_speed", 0.22)
+        self.declare_parameter("caution_speed", 0.35)
+        self.declare_parameter("straight_min_speed", 1.00)
+        self.declare_parameter("straight_steering_threshold", 0.18)
         self.declare_parameter("max_angular", 1.35)
 
         # 차선 중심 오차를 조향값으로 바꾸는 PID 계수입니다.
@@ -78,14 +92,23 @@ class LimoAutonomousDrive(Node):
         self.declare_parameter("single_lane_offset_ratio", 0.24)
         self.declare_parameter("min_lane_area", 180)
         self.declare_parameter("max_lane_area_ratio", 0.18)
-        self.declare_parameter("min_lane_confidence", 0.12)
+        self.declare_parameter("min_lane_confidence", 0.35)
         self.declare_parameter("lane_search_band_count", 6)
         self.declare_parameter("lane_search_band_height", 18)
         self.declare_parameter("lane_min_band_pixels", 8)
+        self.declare_parameter("min_lane_band_count", 3)
         self.declare_parameter("lane_histogram_margin_ratio", 0.08)
+        self.declare_parameter("max_lane_peak_width_ratio", 0.055)
+        self.declare_parameter("max_lane_x_std_ratio", 0.08)
+        self.declare_parameter("min_lane_width_ratio", 0.30)
+        self.declare_parameter("max_lane_width_ratio", 0.72)
+        self.declare_parameter("max_lane_mask_ratio", 0.16)
         self.declare_parameter("black_road_value_max", 95)
         self.declare_parameter("black_road_saturation_min", 0)
         self.declare_parameter("min_road_ratio_for_lane", 0.25)
+        self.declare_parameter("reflected_road_ratio_for_lane", 0.10)
+        self.declare_parameter("min_road_between_ratio", 0.18)
+        self.declare_parameter("reflected_road_between_ratio", 0.06)
         self.declare_parameter("camera_obstacle_roi_top_ratio", 0.72)
         self.declare_parameter("camera_obstacle_center_width_ratio", 0.46)
         self.declare_parameter("camera_obstacle_min_ratio", 0.06)
@@ -95,8 +118,8 @@ class LimoAutonomousDrive(Node):
         # 라이다가 안전하면 저속으로 전진하고,
         # 가까운 장애물은 기존 회피 로직을 씁니다.
         self.declare_parameter("enable_lane_lost_drive", True)
-        self.declare_parameter("lane_lost_speed", 0.28)
-        self.declare_parameter("lane_lost_min_speed", 0.22)
+        self.declare_parameter("lane_lost_speed", 0.50)
+        self.declare_parameter("lane_lost_min_speed", 0.50)
         self.declare_parameter("lane_lost_steering_decay", 0.45)
         self.declare_parameter("lane_lost_use_lidar", True)
         self.declare_parameter("lane_lost_lidar_angle_deg", 95.0)
@@ -208,7 +231,7 @@ class LimoAutonomousDrive(Node):
         hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
         gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
 
-        white_mask = cv2.inRange(hsv, np.array([0, 0, 145]), np.array([180, 80, 255]))
+        white_mask = cv2.inRange(hsv, np.array([0, 0, 150]), np.array([180, 90, 255]))
         adaptive_white = cv2.adaptiveThreshold(
             gray,
             255,
@@ -217,6 +240,7 @@ class LimoAutonomousDrive(Node):
             31,
             -8,
         )
+        adaptive_white = cv2.bitwise_and(adaptive_white, white_mask)
         mask = cv2.bitwise_or(white_mask, adaptive_white)
 
         # 작은 노이즈는 제거하고 끊긴 차선 조각은 어느 정도 이어줍니다.
@@ -309,16 +333,32 @@ class LimoAutonomousDrive(Node):
         )
 
         image_center = width / 2.0
-        left_x, left_count = self.find_lane_x_from_bands(mask, 0, int(image_center))
-        right_x, right_count = self.find_lane_x_from_bands(
+        left_track = self.find_lane_x_from_bands(mask, 0, int(image_center))
+        right_track = self.find_lane_x_from_bands(
             mask,
             int(image_center),
             width,
         )
+        left_x = left_track.x if left_track.valid else None
+        right_x = right_track.x if right_track.valid else None
+        left_count = left_track.count if left_track.valid else 0
+        right_count = right_track.count if right_track.valid else 0
         rejected_large_count = 0
         mask_ratio = float(cv2.countNonZero(mask)) / float(mask.size)
         road_ratio = float(cv2.countNonZero(road_mask)) / float(road_mask.size)
         min_road_ratio = float(self.get_parameter("min_road_ratio_for_lane").value)
+        reflected_road_ratio = float(
+            self.get_parameter("reflected_road_ratio_for_lane").value
+        )
+        min_road_between_ratio = float(
+            self.get_parameter("min_road_between_ratio").value
+        )
+        reflected_road_between_ratio = float(
+            self.get_parameter("reflected_road_between_ratio").value
+        )
+        min_width_ratio = float(self.get_parameter("min_lane_width_ratio").value)
+        max_width_ratio = float(self.get_parameter("max_lane_width_ratio").value)
+        max_mask_ratio = float(self.get_parameter("max_lane_mask_ratio").value)
 
         # 너무 큰 흰색 배경이 들어오는지
         # 로그로 확인하기 위한 보조 카운트입니다.
@@ -331,9 +371,21 @@ class LimoAutonomousDrive(Node):
                 rejected_large_count += 1
 
         confidence = 0.0
+        geometry_valid = False
+        road_between_ratio = 0.0
+        lane_width_ratio = 0.0
         if left_x is not None and right_x is not None:
             # 양쪽 차선이 보이면 두 차선의 중간을 주행 중심으로 봅니다.
             lane_width = max(right_x - left_x, 1.0)
+            lane_width_ratio = lane_width / width
+            road_between_ratio = self.road_between_lanes_ratio(
+                road_mask,
+                left_x,
+                right_x,
+            )
+            width_valid = min_width_ratio <= lane_width_ratio <= max_width_ratio
+            mask_valid = mask_ratio <= max_mask_ratio
+            geometry_valid = width_valid and mask_valid
             lane_center = (left_x + right_x) / 2.0
             width_score = 1.0 - min(
                 abs(lane_width - expected_lane_width) / expected_lane_width,
@@ -341,23 +393,30 @@ class LimoAutonomousDrive(Node):
             )
             count_score = min((left_count + right_count) / 8.0, 1.0)
             road_score = min(road_ratio / 0.35, 1.0)
-            confidence = (
-                0.45
-                + 0.35 * width_score
-                + 0.15 * count_score
-                + 0.05 * road_score
-            )
+            between_score = min(road_between_ratio / min_road_between_ratio, 1.0)
+            if geometry_valid:
+                confidence = (
+                    0.45
+                    + 0.35 * width_score
+                    + 0.10 * count_score
+                    + 0.05 * road_score
+                    + 0.05 * between_score
+                )
         elif left_x is not None:
             # 한쪽 차선만 보이면 예상 차선 폭으로 반대쪽을 가정합니다.
             lane_center = left_x + single_lane_offset
-            confidence = 0.45
+            confidence = 0.20 if mask_ratio <= max_mask_ratio else 0.0
         elif right_x is not None:
             lane_center = right_x - single_lane_offset
-            confidence = 0.45
+            confidence = 0.20 if mask_ratio <= max_mask_ratio else 0.0
         else:
             lane_center = image_center
 
-        road_valid = road_ratio >= min_road_ratio
+        road_valid = road_ratio >= min_road_ratio or (
+            geometry_valid
+            and road_ratio >= reflected_road_ratio
+            and road_between_ratio >= reflected_road_between_ratio
+        )
         if not road_valid:
             # 검은 도로가 충분히 보이지 않으면 흰 책상/흰 벽을
             # 차선으로 오인했을 가능성이 큽니다.
@@ -378,6 +437,9 @@ class LimoAutonomousDrive(Node):
             camera_obstacle_ratio,
             camera_obstacle,
             road_valid,
+            geometry_valid,
+            road_between_ratio,
+            lane_width_ratio,
         )
 
     def find_lane_x_from_bands(
@@ -385,10 +447,16 @@ class LimoAutonomousDrive(Node):
         mask,
         x_start: int,
         x_end: int,
-    ) -> Tuple[Optional[float], int]:
+    ) -> LaneTrack:
         band_count = int(self.get_parameter("lane_search_band_count").value)
         band_height = int(self.get_parameter("lane_search_band_height").value)
         min_pixels = int(self.get_parameter("lane_min_band_pixels").value)
+        min_band_count = int(self.get_parameter("min_lane_band_count").value)
+        max_peak_width = (
+            mask.shape[1]
+            * float(self.get_parameter("max_lane_peak_width_ratio").value)
+        )
+        max_std_ratio = float(self.get_parameter("max_lane_x_std_ratio").value)
         margin = int(
             mask.shape[1]
             * float(self.get_parameter("lane_histogram_margin_ratio").value)
@@ -396,9 +464,10 @@ class LimoAutonomousDrive(Node):
         x_start = max(0, x_start + margin)
         x_end = min(mask.shape[1], x_end - margin)
         if x_end <= x_start:
-            return None, 0
+            return LaneTrack(None, 0, 1.0, 1.0, False)
 
         weighted_positions = []
+        peak_widths = []
         height = mask.shape[0]
         for band in range(band_count):
             y_end = height - band * band_height
@@ -410,16 +479,56 @@ class LimoAutonomousDrive(Node):
             peak_pixels = int(np.max(histogram)) if histogram.size else 0
             if peak_pixels < min_pixels:
                 continue
-            peak_x = int(np.argmax(histogram)) + x_start
+            peak_index = int(np.argmax(histogram))
+            active_columns = histogram >= max(1, int(peak_pixels * 0.45))
+            peak_width = self.contiguous_width(active_columns, peak_index)
+            if peak_width > max_peak_width:
+                continue
+            peak_x = peak_index + x_start
             weight = float(band_count - band)
             weighted_positions.append((peak_x, weight))
+            peak_widths.append(peak_width)
 
         if not weighted_positions:
-            return None, 0
+            return LaneTrack(None, 0, 1.0, 1.0, False)
 
         weighted_sum = sum(x * weight for x, weight in weighted_positions)
         total_weight = sum(weight for _, weight in weighted_positions)
-        return weighted_sum / total_weight, len(weighted_positions)
+        x = weighted_sum / total_weight
+        positions = np.array([position for position, _ in weighted_positions])
+        std_ratio = float(np.std(positions) / max(mask.shape[1], 1))
+        width_ratio = float(np.mean(peak_widths) / max(mask.shape[1], 1))
+        valid = len(weighted_positions) >= min_band_count and std_ratio <= max_std_ratio
+        return LaneTrack(x, len(weighted_positions), std_ratio, width_ratio, valid)
+
+    def contiguous_width(self, active_columns, peak_index: int) -> int:
+        left = peak_index
+        while left > 0 and active_columns[left - 1]:
+            left -= 1
+
+        right = peak_index
+        while right + 1 < len(active_columns) and active_columns[right + 1]:
+            right += 1
+
+        return right - left + 1
+
+    def road_between_lanes_ratio(
+        self,
+        road_mask,
+        left_x: float,
+        right_x: float,
+    ) -> float:
+        left = int(max(0, min(left_x, right_x)))
+        right = int(min(road_mask.shape[1], max(left_x, right_x)))
+        if right <= left:
+            return 0.0
+
+        y_start = int(road_mask.shape[0] * 0.45)
+        between = road_mask[y_start:, left:right]
+        if between.size == 0:
+            return 0.0
+
+        return float(cv2.countNonZero(between)) / float(between.size)
 
     def draw_debug(self, frame, mask, roi_top: int, lane: LaneResult):
         debug = frame.copy()
@@ -586,9 +695,18 @@ class LimoAutonomousDrive(Node):
     def speed_from_lane(self, lane: LaneResult, steering: float) -> float:
         max_speed = float(self.get_parameter("max_speed").value)
         min_speed = float(self.get_parameter("min_speed").value)
+        straight_min_speed = float(self.get_parameter("straight_min_speed").value)
+        straight_threshold = float(
+            self.get_parameter("straight_steering_threshold").value
+        )
         turn_factor = 1.0 - min(abs(steering) / 1.4, 0.75)
         confidence_factor = 0.45 + 0.55 * lane.confidence
-        return max(min_speed, max_speed * turn_factor * confidence_factor)
+        speed = max(min_speed, max_speed * turn_factor * confidence_factor)
+
+        if abs(steering) <= straight_threshold:
+            speed = max(speed, straight_min_speed)
+
+        return min(speed, max_speed)
 
     def lidar_fallback_command(self, scan: LaserScan) -> Tuple[float, float]:
         search_angle = self.param_rad("lane_lost_lidar_angle_deg")
@@ -769,6 +887,9 @@ class LimoAutonomousDrive(Node):
             f"mask={lane.mask_ratio * 100.0:.2f}% "
             f"road={lane.road_ratio * 100.0:.2f}% "
             f"road_ok={lane.road_valid} "
+            f"geom_ok={lane.geometry_valid} "
+            f"between={lane.road_between_ratio * 100.0:.2f}% "
+            f"width={lane.lane_width_ratio:.2f} "
             f"cam_obs={lane.camera_obstacle_ratio * 100.0:.2f}% "
             f"cam_hit={lane.camera_obstacle} "
             f"left={left_text} "

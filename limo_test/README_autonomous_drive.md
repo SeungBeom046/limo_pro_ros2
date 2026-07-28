@@ -101,11 +101,12 @@ ros2 run limo_test autonomous_drive --ros-args --params-file ~/wego_ws/src/limo_
    `closest_sample_count`를 `1`로 유지합니다.
 8. AEB가 너무 민감하면 `aeb_sector_deg`를 줄이고, 너무 늦으면 `aeb_distance`를
    `0.25` 정도로 키웁니다.
-9. 차선이 없는 바닥에서 안 굴러가면 `lane_lost_speed`, `lane_lost_min_speed`를
-   올립니다. 너무 빠르면 `lane_lost_speed`를 낮춥니다. 라이다
+9. 차선이 없는 바닥에서는 기본 `lane_lost_speed: 0.50`으로 라이다 fallback
+   저속 주행을 합니다. 너무 빠르면 `lane_lost_speed`를 낮춥니다. 라이다
    fallback이 너무 크게 꺾으면 `lane_lost_gap_gain`, `lane_lost_obstacle_gain`을
    낮춥니다.
-10. 실차 첫 주행이 불안하면 `max_speed: 0.30` 정도로 낮춘 뒤 점진적으로 올립니다.
+10. 차선 인식 직진 구간은 `straight_min_speed: 1.00` 이상으로 주행합니다.
+   불안하면 `straight_min_speed`, `max_speed`를 낮춘 뒤 점진적으로 올립니다.
 
 ## 안전 메모
 
@@ -117,7 +118,7 @@ ros2 run limo_test autonomous_drive --ros-args --params-file ~/wego_ws/src/limo_
 기본 주행 로그는 한 줄에 핵심 3개만 출력합니다.
 
 ```text
-차선: 인식 | AEB: 미작동 | 속도: 0.42m/s
+차선: 인식 | AEB: 미작동 | 속도: 1.00m/s
 차선: 미인식 | AEB: 작동 | 속도: 0.00m/s
 ```
 
@@ -133,6 +134,12 @@ lane frame=640x480 roi_y=264:480 roi_h=216 mask=2.30% road=72.00% cam_obs=1.20% 
   조명, 검은색 임계값을 봐야 합니다.
 - `road`가 `min_road_ratio_for_lane`보다 낮으면 흰 선이 보여도 차선으로 인정하지
   않고 라이다 fallback으로 전환합니다.
+- 흰 물체 오인을 줄이기 위해 차선 후보는 `min_lane_band_count`개 이상의 row
+  band에서 이어져야 하고, `max_lane_peak_width_ratio`보다 넓은 흰 덩어리는
+  차선에서 제외합니다.
+- 햇빛 반사로 도로가 덜 검게 보일 때는 라인 모양이 충분히 정확하면
+  `reflected_road_ratio_for_lane`, `reflected_road_between_ratio` 기준으로
+  완화해서 차선을 인정합니다.
 - `cam_obs/cam_hit`: 카메라 하단 중앙의 낮은 장애물 의심 비율과 감지 여부입니다.
 - `left/right`: 좌우 차선 후보의 x 위치입니다. `none`이면 해당 방향 차선을
   못 잡은 것입니다.

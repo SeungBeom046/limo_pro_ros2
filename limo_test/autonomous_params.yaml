@@ -11,9 +11,11 @@ limo_autonomous_drive:
     lane_log_period_sec: 0.5
 
     control_rate_hz: 20.0
-    max_speed: 0.55
+    max_speed: 1.20
     min_speed: 0.18
-    caution_speed: 0.22
+    caution_speed: 0.35
+    straight_min_speed: 1.00
+    straight_steering_threshold: 0.18
     max_angular: 1.35
 
     kp: 1.45
@@ -26,21 +28,30 @@ limo_autonomous_drive:
     single_lane_offset_ratio: 0.24
     min_lane_area: 180
     max_lane_area_ratio: 0.18
-    min_lane_confidence: 0.12
+    min_lane_confidence: 0.35
     lane_search_band_count: 6
     lane_search_band_height: 18
     lane_min_band_pixels: 8
+    min_lane_band_count: 3
     lane_histogram_margin_ratio: 0.08
+    max_lane_peak_width_ratio: 0.055
+    max_lane_x_std_ratio: 0.08
+    min_lane_width_ratio: 0.30
+    max_lane_width_ratio: 0.72
+    max_lane_mask_ratio: 0.16
     black_road_value_max: 95
     black_road_saturation_min: 0
     min_road_ratio_for_lane: 0.25
+    reflected_road_ratio_for_lane: 0.10
+    min_road_between_ratio: 0.18
+    reflected_road_between_ratio: 0.06
     camera_obstacle_roi_top_ratio: 0.72
     camera_obstacle_center_width_ratio: 0.46
     camera_obstacle_min_ratio: 0.06
 
     enable_lane_lost_drive: true
-    lane_lost_speed: 0.28
-    lane_lost_min_speed: 0.22
+    lane_lost_speed: 0.50
+    lane_lost_min_speed: 0.50
     lane_lost_steering_decay: 0.45
     lane_lost_use_lidar: true
     lane_lost_lidar_angle_deg: 95.0
