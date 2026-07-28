@@ -1093,7 +1093,10 @@ class LimoAutonomousDrive(Node):
                 self.latest_scan
             )
             if mode == "stop_turn":
-                speed = obstacle_speed
+                if lane_lost_active:
+                    speed = float(self.get_parameter("lane_lost_min_speed").value)
+                else:
+                    speed = obstacle_speed
                 steering = obstacle_steering
                 drive_state = mode
             elif mode == "aeb_stop":
@@ -1162,9 +1165,17 @@ class LimoAutonomousDrive(Node):
                 self.latest_depth_obstacle
             )
             if depth_stop:
-                speed = 0.0
-                steering = 0.0
-                drive_state = "depth_stop"
+                if lane_lost_active:
+                    speed = float(self.get_parameter("lane_lost_min_speed").value)
+                    steering += (
+                        float(self.get_parameter("depth_avoid_gain").value)
+                        * depth_delta
+                    )
+                    drive_state = "depth_slow"
+                else:
+                    speed = 0.0
+                    steering = 0.0
+                    drive_state = "depth_stop"
             elif depth_slow:
                 if lane_lost_active:
                     speed = max(
@@ -1187,7 +1198,6 @@ class LimoAutonomousDrive(Node):
             and scan_ok
             and drive_state not in (
                 "aeb_stop",
-                "stop_turn",
                 "depth_stop",
                 "camera_invalid",
             )
