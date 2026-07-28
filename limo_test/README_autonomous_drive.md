@@ -78,6 +78,8 @@ ros2 run limo_test autonomous_drive --ros-args --params-file ~/wego_ws/src/limo_
 ## 알고리즘
 
 1. 카메라 하단 ROI에서 검은 도로와 흰색 좌/우 차선을 분리합니다.
+   실제 트랙은 자동 노출/반사 때문에 흰 선이 어둡게 보일 수 있어 고정 HSV
+   임계값과 ROI 대비 기반 임계값을 함께 사용합니다.
 2. 중간 시야부터 아래까지 여러 row band를 보고, 아래쪽은 차선 폭을 넓게,
    위쪽은 좁게 기대하는 원근 모델을 적용합니다.
 3. 각 band에서 여러 흰색 peak 후보를 뽑고, 아래에서 위로 가장 연속적인 좌/우
@@ -101,12 +103,16 @@ ros2 run limo_test autonomous_drive --ros-args --params-file ~/wego_ws/src/limo_
    가까우면 정지하고, 조금 멀면 감속하며 빈 쪽으로 조향합니다.
 14. 차선이 안 보이면 `lane_lost_lidar` fallback으로 전환해 라이다 기준 열린
    방향을 찾고, 가까운 물체 반대쪽으로 조향합니다.
-15. 카메라 또는 라이다 데이터가 끊기면 속도를 낮추거나 정지합니다.
+15. 검은 트랙 화면은 정상 도로로 취급합니다. 화면이 거의 흰색이고 검은 도로가
+   거의 없을 때만 카메라 이상으로 판단합니다.
+16. 카메라 또는 라이다 데이터가 끊기면 속도를 낮추거나 정지합니다.
 
 ## 튜닝 순서
 
 1. 바퀴를 띄우거나 낮은 속도에서 `/cmd_vel`이 안전하게 들어가는지 확인합니다.
 2. `debug_image_topic`을 보면서 `roi_top_ratio`, `lane_min_band_pixels`를 맞춥니다.
+   트랙 위에서 차선이 계속 미인식이면 먼저 `black_road_value_max`를 130~150까지
+   올리고, 흰 선이 끊겨 보이면 `white_lane_value_min`을 95~105 범위에서 낮춥니다.
 3. 차선 중심이 흔들리면 `kd`를 조금 올리고, 반응이 너무 강하면 `kp`를 낮춥니다.
 4. 장애물 회피가 늦으면 `slow_distance`, `stop_distance`를 키웁니다.
 5. 터널에서 벽 때문에 튀면 `tunnel_side_distance`와 `tunnel_balance_tolerance`를

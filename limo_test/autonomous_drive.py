@@ -112,7 +112,10 @@ class LimoAutonomousDrive(Node):
         self.declare_parameter("single_lane_offset_ratio", 0.24)
         self.declare_parameter("min_lane_area", 180)
         self.declare_parameter("max_lane_area_ratio", 0.18)
-        self.declare_parameter("min_lane_confidence", 0.35)
+        self.declare_parameter("min_lane_confidence", 0.30)
+        self.declare_parameter("white_lane_value_min", 105)
+        self.declare_parameter("white_lane_saturation_max", 170)
+        self.declare_parameter("white_lane_relative_margin", 28)
         self.declare_parameter("lane_search_band_count", 9)
         self.declare_parameter("lane_search_band_height", 20)
         self.declare_parameter("lane_min_band_pixels", 8)
@@ -127,11 +130,11 @@ class LimoAutonomousDrive(Node):
         self.declare_parameter("max_lane_width_ratio", 0.85)
         self.declare_parameter("max_lane_mask_ratio", 0.24)
         self.declare_parameter("blank_white_mask_ratio", 0.65)
-        self.declare_parameter("blank_black_road_ratio", 0.90)
-        self.declare_parameter("blank_black_mask_ratio", 0.01)
-        self.declare_parameter("black_road_value_max", 95)
+        self.declare_parameter("blank_black_road_ratio", 1.10)
+        self.declare_parameter("blank_black_mask_ratio", 0.0)
+        self.declare_parameter("black_road_value_max", 120)
         self.declare_parameter("black_road_saturation_min", 0)
-        self.declare_parameter("min_road_ratio_for_lane", 0.15)
+        self.declare_parameter("min_road_ratio_for_lane", 0.08)
         self.declare_parameter("reflected_road_ratio_for_lane", 0.05)
         self.declare_parameter("min_road_between_ratio", 0.08)
         self.declare_parameter("reflected_road_between_ratio", 0.03)
@@ -329,7 +332,32 @@ class LimoAutonomousDrive(Node):
         hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
         gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
 
-        white_mask = cv2.inRange(hsv, np.array([0, 0, 130]), np.array([180, 120, 255]))
+        white_value_min = int(self.get_parameter("white_lane_value_min").value)
+        white_saturation_max = int(
+            self.get_parameter("white_lane_saturation_max").value
+        )
+        relative_margin = int(
+            self.get_parameter("white_lane_relative_margin").value
+        )
+        low_saturation_mask = cv2.inRange(
+            hsv[:, :, 1],
+            0,
+            white_saturation_max,
+        )
+        white_mask = cv2.inRange(
+            hsv,
+            np.array([0, 0, white_value_min]),
+            np.array([180, white_saturation_max, 255]),
+        )
+
+        # 트랙 위 실제 카메라는 자동 노출 때문에 흰 차선도 어둡게 보일 수 있습니다.
+        # 그래서 고정 밝기 기준 외에 ROI 평균보다 확실히 밝은 저채도 픽셀도
+        # 차선 후보로 함께 사용합니다.
+        relative_threshold = int(
+            np.clip(np.mean(gray) + relative_margin, white_value_min, 245)
+        )
+        relative_white = cv2.inRange(gray, relative_threshold, 255)
+        relative_white = cv2.bitwise_and(relative_white, low_saturation_mask)
         adaptive_white = cv2.adaptiveThreshold(
             gray,
             255,
@@ -338,8 +366,9 @@ class LimoAutonomousDrive(Node):
             31,
             -8,
         )
-        adaptive_white = cv2.bitwise_and(adaptive_white, white_mask)
-        mask = cv2.bitwise_or(white_mask, adaptive_white)
+        adaptive_white = cv2.bitwise_and(adaptive_white, low_saturation_mask)
+        mask = cv2.bitwise_or(white_mask, relative_white)
+        mask = cv2.bitwise_or(mask, adaptive_white)
 
         # 작은 노이즈는 제거하고 끊긴 차선 조각은 어느 정도 이어줍니다.
         kernel = np.ones((3, 3), np.uint8)
@@ -496,10 +525,6 @@ class LimoAutonomousDrive(Node):
             * mask.shape[1]
             * float(self.get_parameter("max_lane_area_ratio").value)
         )
-        single_lane_offset = width * float(
-            self.get_parameter("single_lane_offset_ratio").value
-        )
-
         image_center = width / 2.0
         pair_track = self.find_lane_pair_tracks(mask, road_mask, width)
         if pair_track.valid:
@@ -539,13 +564,17 @@ class LimoAutonomousDrive(Node):
         blank_black_mask_ratio = float(
             self.get_parameter("blank_black_mask_ratio").value
         )
-        camera_valid = not (
+        white_invalid = (
             mask_ratio >= blank_white_ratio
-            or (
-                road_ratio >= blank_black_road_ratio
-                and mask_ratio <= blank_black_mask_ratio
-            )
+            and road_ratio < min_road_ratio
         )
+        black_invalid = (
+            blank_black_road_ratio <= 1.0
+            and
+            road_ratio >= blank_black_road_ratio
+            and mask_ratio <= blank_black_mask_ratio
+        )
+        camera_valid = not (white_invalid or black_invalid)
 
         # 너무 큰 흰색 배경이 들어오는지
         # 로그로 확인하기 위한 보조 카운트입니다.
@@ -599,11 +628,21 @@ class LimoAutonomousDrive(Node):
                 )
         elif left_x is not None:
             # 한쪽 차선만 보이면 예상 차선 폭으로 반대쪽을 가정합니다.
-            lane_center = left_x + single_lane_offset
-            confidence = 0.20 if mask_ratio <= max_mask_ratio else 0.0
+            expected_width = width * self.expected_lane_width_ratio_at(
+                float(self.get_parameter("lookahead_ratio").value)
+            )
+            lane_center = left_x + expected_width / 2.0
+            lane_width_ratio = expected_width / width
+            geometry_valid = mask_ratio <= max_mask_ratio
+            confidence = 0.38 if geometry_valid else 0.0
         elif right_x is not None:
-            lane_center = right_x - single_lane_offset
-            confidence = 0.20 if mask_ratio <= max_mask_ratio else 0.0
+            expected_width = width * self.expected_lane_width_ratio_at(
+                float(self.get_parameter("lookahead_ratio").value)
+            )
+            lane_center = right_x - expected_width / 2.0
+            lane_width_ratio = expected_width / width
+            geometry_valid = mask_ratio <= max_mask_ratio
+            confidence = 0.38 if geometry_valid else 0.0
         else:
             lane_center = image_center
 
