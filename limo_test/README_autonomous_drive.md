@@ -70,7 +70,7 @@ ros2 run limo_test autonomous_drive --ros-args --params-file ~/wego_ws/src/limo_
 ## 사용하는 토픽
 
 - Subscribe: `/camera/color/image_raw` (`sensor_msgs/Image`)
-- Subscribe: `/camera/depth/image_raw` (`sensor_msgs/Image`)
+- Subscribe: `/camera/depth/image_raw` (`sensor_msgs/Image`, 기본 비활성)
 - Subscribe: `/scan` (`sensor_msgs/LaserScan`)
 - Publish: `/cmd_vel` (`geometry_msgs/Twist`)
 - Publish: `/limo/autonomy/debug_image` (`sensor_msgs/Image`)
@@ -91,8 +91,8 @@ ros2 run limo_test autonomous_drive --ros-args --params-file ~/wego_ws/src/limo_
 6. 중심 오차를 PID 제어로 조향값에 반영합니다.
 7. 라이다 전방 장애물이 `slow_distance` 안에 들어오면 감속하며 빈 공간 쪽으로
    회피합니다.
-8. 라이다 전방 장애물이 `stop_distance` 안에 들어오면 전진을 멈추고 더 넓은
-   방향으로 제자리 회전합니다.
+8. 라이다 전방 장애물이 `stop_distance` 안에 들어오면 AEB 전까지는 저속으로
+   더 넓은 방향을 향해 회피합니다.
 9. 라이다 전방 20cm 이내는 AEB로 즉시 정지한 뒤, 옵션이 켜져 있으면 짧게
    후진하고 열린 쪽으로 저속 선회해 다시 길을 찾습니다.
 10. 터널에서는 양쪽 라이다 벽을 장애물이 아니라 통로 벽으로 보고 중앙을 유지합니다.
@@ -100,8 +100,8 @@ ros2 run limo_test autonomous_drive --ros-args --params-file ~/wego_ws/src/limo_
    우측 바깥 중 가장 넓은 gap을 골라 `slalom_gap`으로 통과합니다.
 12. 책상 다리처럼 얇은 장애물은 섹터 퍼센타일 대신 가까운 beam 값을 사용해
    감지합니다.
-13. 낮은 턱처럼 라이다가 놓칠 수 있는 장애물은 depth 카메라 하단 ROI로 감지해
-   가까우면 정지하고, 조금 멀면 감속하며 빈 쪽으로 조향합니다.
+13. depth 카메라 장애물 회피 코드는 남겨두었지만, 현재 기본값은
+   `enable_depth_obstacle: false`라 구독과 연산을 하지 않습니다.
 14. 차선이 안 보이면 `lane_lost_lidar` fallback으로 전환해 라이다 기준 열린
    방향을 찾고, 가까운 물체 반대쪽으로 조향합니다.
 15. 검은 트랙 화면은 정상 도로로 취급합니다. 화면이 거의 흰색이고 검은 도로가
@@ -126,12 +126,14 @@ ros2 run limo_test autonomous_drive --ros-args --params-file ~/wego_ws/src/limo_
    `0.25` 정도로 키웁니다.
    AEB 후진 복구가 과하면 `enable_aeb_recovery: false`로 끄거나
    `aeb_recovery_reverse_speed`, `aeb_recovery_reverse_sec`를 낮춥니다.
-9. 차선이 없는 바닥에서는 기본 `lane_lost_speed: 0.25`로 라이다 fallback
-   저속 주행을 합니다. 너무 빠르면 `lane_lost_speed`를 낮춥니다. 라이다
+9. 차선이 없는 바닥에서는 기본 `lane_lost_speed: 0.80`으로 라이다 fallback
+   주행을 합니다. 너무 빠르면 `lane_lost_speed`를 낮춥니다. 라이다
    fallback이 너무 크게 꺾으면 `lane_lost_gap_gain`, `lane_lost_obstacle_gain`을
    낮춥니다.
-10. 차선 인식 직진 구간은 `straight_min_speed: 1.00` 이상으로 주행합니다.
+10. 차선 인식 직진 구간은 `straight_min_speed: 1.40`까지 주행합니다.
    불안하면 `straight_min_speed`, `max_speed`를 낮춘 뒤 점진적으로 올립니다.
+   코너에서 너무 느리면 `lane_follow_min_speed`를 올리고, 흔들리면
+   `steering_smoothing`을 0.45 정도로 올립니다.
 
 ## 안전 메모
 
@@ -143,8 +145,8 @@ ros2 run limo_test autonomous_drive --ros-args --params-file ~/wego_ws/src/limo_
 기본 주행 로그는 한 줄에 핵심 3개만 출력합니다.
 
 ```text
-차선: 인식 | AEB: 미작동 | 속도: 1.00m/s
-차선: 미인식 | AEB: 미작동 | 속도: 0.25m/s
+차선: 인식 | AEB: 미작동 | 속도: 1.40m/s
+차선: 미인식 | AEB: 미작동 | 속도: 0.80m/s
 차선: 미인식 | AEB: 작동 | 속도: 0.00m/s
 ```
 

@@ -14,12 +14,14 @@ limo_autonomous_drive:
     depth_qos: auto
 
     control_rate_hz: 20.0
-    max_speed: 1.20
+    max_speed: 1.40
     min_speed: 0.18
+    lane_follow_min_speed: 0.55
     caution_speed: 0.35
-    straight_min_speed: 1.00
-    straight_steering_threshold: 0.18
+    straight_min_speed: 1.40
+    straight_steering_threshold: 0.25
     max_angular: 1.35
+    steering_smoothing: 0.35
 
     kp: 1.45
     ki: 0.0
@@ -63,10 +65,11 @@ limo_autonomous_drive:
     camera_obstacle_roi_top_ratio: 0.72
     camera_obstacle_center_width_ratio: 0.46
     camera_obstacle_min_ratio: 0.06
+    enable_camera_low_obstacle: false
 
     enable_lane_lost_drive: true
-    lane_lost_speed: 0.25
-    lane_lost_min_speed: 0.25
+    lane_lost_speed: 0.80
+    lane_lost_min_speed: 0.80
     lane_lost_steering_decay: 0.45
     lane_lost_use_lidar: true
     lane_lost_lidar_angle_deg: 95.0
@@ -100,9 +103,9 @@ limo_autonomous_drive:
     slalom_obstacle_distance: 0.75
     slalom_min_gap_indices: 5
     slalom_kp: 1.0
-    slalom_speed: 0.25
+    slalom_speed: 0.80
     slalom_lane_mix: 0.35
-    enable_depth_obstacle: true
+    enable_depth_obstacle: false
     depth_timeout_sec: 0.7
     depth_near_distance: 0.45
     depth_slow_distance: 0.75

@@ -87,12 +87,14 @@ class LimoAutonomousDrive(Node):
         # 속도는 실차 주행 기준으로 너무 답답하지 않게 잡되,
         # 장애물이나 차선 신뢰도에 따라 아래에서 자동으로 줄입니다.
         self.declare_parameter("control_rate_hz", 20.0)
-        self.declare_parameter("max_speed", 1.20)
+        self.declare_parameter("max_speed", 1.40)
         self.declare_parameter("min_speed", 0.18)
+        self.declare_parameter("lane_follow_min_speed", 0.55)
         self.declare_parameter("caution_speed", 0.35)
-        self.declare_parameter("straight_min_speed", 1.00)
-        self.declare_parameter("straight_steering_threshold", 0.18)
+        self.declare_parameter("straight_min_speed", 1.40)
+        self.declare_parameter("straight_steering_threshold", 0.25)
         self.declare_parameter("max_angular", 1.35)
+        self.declare_parameter("steering_smoothing", 0.35)
 
         # 차선 중심 오차를 조향값으로 바꾸는 PID 계수입니다.
         # 흔들리면 kd를 올리고,
@@ -141,14 +143,15 @@ class LimoAutonomousDrive(Node):
         self.declare_parameter("camera_obstacle_roi_top_ratio", 0.72)
         self.declare_parameter("camera_obstacle_center_width_ratio", 0.46)
         self.declare_parameter("camera_obstacle_min_ratio", 0.06)
+        self.declare_parameter("enable_camera_low_obstacle", False)
 
         # 차선이 안 잡혀도 실내 바닥에서
         # 바로 멈추지 않도록 하는 탐색 모드입니다.
         # 라이다가 안전하면 저속으로 전진하고,
         # 가까운 장애물은 기존 회피 로직을 씁니다.
         self.declare_parameter("enable_lane_lost_drive", True)
-        self.declare_parameter("lane_lost_speed", 0.25)
-        self.declare_parameter("lane_lost_min_speed", 0.25)
+        self.declare_parameter("lane_lost_speed", 0.80)
+        self.declare_parameter("lane_lost_min_speed", 0.80)
         self.declare_parameter("lane_lost_steering_decay", 0.45)
         self.declare_parameter("lane_lost_use_lidar", True)
         self.declare_parameter("lane_lost_lidar_angle_deg", 95.0)
@@ -184,9 +187,9 @@ class LimoAutonomousDrive(Node):
         self.declare_parameter("slalom_obstacle_distance", 0.75)
         self.declare_parameter("slalom_min_gap_indices", 5)
         self.declare_parameter("slalom_kp", 1.0)
-        self.declare_parameter("slalom_speed", 0.25)
+        self.declare_parameter("slalom_speed", 0.80)
         self.declare_parameter("slalom_lane_mix", 0.35)
-        self.declare_parameter("enable_depth_obstacle", True)
+        self.declare_parameter("enable_depth_obstacle", False)
         self.declare_parameter("depth_timeout_sec", 0.7)
         self.declare_parameter("depth_near_distance", 0.45)
         self.declare_parameter("depth_slow_distance", 0.75)
@@ -230,16 +233,19 @@ class LimoAutonomousDrive(Node):
                 )
             )
 
+        # depth 카메라는 연산량이 크고 현재 트랙에서는 오탐으로 속도를 죽일 수 있어
+        # 기본 비활성화합니다. enable_depth_obstacle을 true로 바꿀 때만 구독합니다.
         self.depth_subs = []
-        for qos_profile in self.image_qos_profiles("depth_qos"):
-            self.depth_subs.append(
-                self.create_subscription(
-                    Image,
-                    self.depth_topic,
-                    self.depth_callback,
-                    qos_profile,
+        if bool(self.get_parameter("enable_depth_obstacle").value):
+            for qos_profile in self.image_qos_profiles("depth_qos"):
+                self.depth_subs.append(
+                    self.create_subscription(
+                        Image,
+                        self.depth_topic,
+                        self.depth_callback,
+                        qos_profile,
+                    )
                 )
-            )
 
         self.scan_sub = self.create_subscription(
             LaserScan,
@@ -1042,7 +1048,12 @@ class LimoAutonomousDrive(Node):
         drive_state = "lane_follow"
 
         if lane_valid:
-            steering = self.pid_steering(lane.center_error, dt)
+            raw_steering = self.pid_steering(lane.center_error, dt)
+            smoothing = float(self.get_parameter("steering_smoothing").value)
+            steering = (
+                (1.0 - smoothing) * raw_steering
+                + smoothing * self.last_steering
+            )
             speed = self.speed_from_lane(lane, steering)
             self.last_steering = steering
         elif (
@@ -1095,6 +1106,8 @@ class LimoAutonomousDrive(Node):
             if mode == "stop_turn":
                 if lane_lost_active:
                     speed = float(self.get_parameter("lane_lost_min_speed").value)
+                elif lane_valid:
+                    speed = float(self.get_parameter("caution_speed").value)
                 else:
                     speed = obstacle_speed
                 steering = obstacle_steering
@@ -1114,11 +1127,23 @@ class LimoAutonomousDrive(Node):
                     steering = obstacle_steering
                     drive_state = mode
             elif mode == "slow_avoid":
-                speed = min(speed, obstacle_speed)
+                if lane_valid:
+                    speed = max(
+                        min(speed, obstacle_speed),
+                        float(self.get_parameter("lane_follow_min_speed").value),
+                    )
+                else:
+                    speed = min(speed, obstacle_speed)
                 steering += obstacle_steering
                 drive_state = mode
             elif mode == "side_avoid":
-                speed = min(speed, obstacle_speed)
+                if lane_valid:
+                    speed = max(
+                        min(speed, obstacle_speed),
+                        float(self.get_parameter("lane_follow_min_speed").value),
+                    )
+                else:
+                    speed = min(speed, obstacle_speed)
                 steering += obstacle_steering
                 drive_state = mode
             elif mode == "tunnel_center":
@@ -1132,6 +1157,10 @@ class LimoAutonomousDrive(Node):
                     )
                 else:
                     speed = min(speed, obstacle_speed)
+                    speed = max(
+                        speed,
+                        float(self.get_parameter("lane_follow_min_speed").value),
+                    )
                 steering = (
                     float(self.get_parameter("slalom_lane_mix").value) * steering
                     + obstacle_steering
@@ -1140,7 +1169,13 @@ class LimoAutonomousDrive(Node):
         else:
             # 라이다가 잠시 끊겼을 때 완전 정지 대신
             # 저속 제한을 걸어 회복 여지를 둡니다.
-            speed = min(speed, float(self.get_parameter("caution_speed").value))
+            if lane_valid:
+                speed = max(
+                    min(speed, float(self.get_parameter("caution_speed").value)),
+                    float(self.get_parameter("lane_follow_min_speed").value),
+                )
+            else:
+                speed = min(speed, float(self.get_parameter("caution_speed").value))
             drive_state = "scan_timeout"
 
         if (
@@ -1149,6 +1184,7 @@ class LimoAutonomousDrive(Node):
             and lane.camera_obstacle
             and lane_valid
             and speed > 0.0
+            and bool(self.get_parameter("enable_camera_low_obstacle").value)
         ):
             # 낮은 턱처럼 라이다가 놓칠 수 있는 물체를
             # 검은 트랙 위 카메라 하단 중앙에서 발견하면 우선 감속합니다.
@@ -1308,13 +1344,20 @@ class LimoAutonomousDrive(Node):
     def speed_from_lane(self, lane: LaneResult, steering: float) -> float:
         max_speed = float(self.get_parameter("max_speed").value)
         min_speed = float(self.get_parameter("min_speed").value)
+        lane_follow_min_speed = float(
+            self.get_parameter("lane_follow_min_speed").value
+        )
         straight_min_speed = float(self.get_parameter("straight_min_speed").value)
         straight_threshold = float(
             self.get_parameter("straight_steering_threshold").value
         )
         turn_factor = 1.0 - min(abs(steering) / 1.4, 0.75)
         confidence_factor = 0.45 + 0.55 * lane.confidence
-        speed = max(min_speed, max_speed * turn_factor * confidence_factor)
+        speed = max(
+            min_speed,
+            lane_follow_min_speed,
+            max_speed * turn_factor * confidence_factor,
+        )
 
         if abs(steering) <= straight_threshold:
             speed = max(speed, straight_min_speed)
