@@ -144,8 +144,8 @@ class LimoAutonomousDrive(Node):
         # 라이다가 안전하면 저속으로 전진하고,
         # 가까운 장애물은 기존 회피 로직을 씁니다.
         self.declare_parameter("enable_lane_lost_drive", True)
-        self.declare_parameter("lane_lost_speed", 0.50)
-        self.declare_parameter("lane_lost_min_speed", 0.50)
+        self.declare_parameter("lane_lost_speed", 0.25)
+        self.declare_parameter("lane_lost_min_speed", 0.25)
         self.declare_parameter("lane_lost_steering_decay", 0.45)
         self.declare_parameter("lane_lost_use_lidar", True)
         self.declare_parameter("lane_lost_lidar_angle_deg", 95.0)
@@ -174,7 +174,7 @@ class LimoAutonomousDrive(Node):
         self.declare_parameter("slalom_obstacle_distance", 0.75)
         self.declare_parameter("slalom_min_gap_indices", 5)
         self.declare_parameter("slalom_kp", 1.0)
-        self.declare_parameter("slalom_speed", 0.45)
+        self.declare_parameter("slalom_speed", 0.25)
         self.declare_parameter("slalom_lane_mix", 0.35)
         self.declare_parameter("enable_depth_obstacle", True)
         self.declare_parameter("depth_timeout_sec", 0.7)
@@ -975,6 +975,7 @@ class LimoAutonomousDrive(Node):
 
         min_confidence = float(self.get_parameter("min_lane_confidence").value)
         lane_valid = lane is not None and lane.confidence >= min_confidence
+        lane_lost_active = False
         drive_state = "lane_follow"
 
         if lane_valid:
@@ -1005,11 +1006,13 @@ class LimoAutonomousDrive(Node):
             ):
                 speed, steering = self.lidar_fallback_command(self.latest_scan)
                 drive_state = "lane_lost_lidar"
+                lane_lost_active = True
             else:
                 decay = float(self.get_parameter("lane_lost_steering_decay").value)
                 steering = self.last_steering * decay
                 speed = float(self.get_parameter("lane_lost_speed").value)
                 drive_state = "lane_lost"
+                lane_lost_active = True
             self.integral = 0.0
             self.get_logger().warn(
                 "Lane not detected. Using lidar fallback.",
@@ -1046,7 +1049,13 @@ class LimoAutonomousDrive(Node):
                 steering += obstacle_steering
                 drive_state = mode
             elif mode == "slalom_gap":
-                speed = min(speed, obstacle_speed)
+                if lane_lost_active:
+                    speed = max(
+                        speed,
+                        float(self.get_parameter("lane_lost_min_speed").value),
+                    )
+                else:
+                    speed = min(speed, obstacle_speed)
                 steering = (
                     float(self.get_parameter("slalom_lane_mix").value) * steering
                     + obstacle_steering
@@ -1062,6 +1071,7 @@ class LimoAutonomousDrive(Node):
             lane is not None
             and lane.road_valid
             and lane.camera_obstacle
+            and lane_valid
             and speed > 0.0
         ):
             # 낮은 턱처럼 라이다가 놓칠 수 있는 물체를
@@ -1083,15 +1093,33 @@ class LimoAutonomousDrive(Node):
                 steering = 0.0
                 drive_state = "depth_stop"
             elif depth_slow:
-                speed = min(
-                    speed,
-                    float(self.get_parameter("low_obstacle_speed").value),
-                )
+                if lane_lost_active:
+                    speed = max(
+                        speed,
+                        float(self.get_parameter("lane_lost_min_speed").value),
+                    )
+                else:
+                    speed = min(
+                        speed,
+                        float(self.get_parameter("low_obstacle_speed").value),
+                    )
                 steering += (
                     float(self.get_parameter("depth_avoid_gain").value)
                     * depth_delta
                 )
                 drive_state = "depth_slow"
+
+        if (
+            lane_lost_active
+            and scan_ok
+            and drive_state not in (
+                "aeb_stop",
+                "stop_turn",
+                "depth_stop",
+                "camera_invalid",
+            )
+        ):
+            speed = float(self.get_parameter("lane_lost_min_speed").value)
 
         max_angular = float(self.get_parameter("max_angular").value)
         msg.linear.x = float(max(speed, 0.0))

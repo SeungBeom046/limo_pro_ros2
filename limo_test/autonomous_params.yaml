@@ -62,8 +62,8 @@ limo_autonomous_drive:
     camera_obstacle_min_ratio: 0.06
 
     enable_lane_lost_drive: true
-    lane_lost_speed: 0.50
-    lane_lost_min_speed: 0.50
+    lane_lost_speed: 0.25
+    lane_lost_min_speed: 0.25
     lane_lost_steering_decay: 0.45
     lane_lost_use_lidar: true
     lane_lost_lidar_angle_deg: 95.0
@@ -90,7 +90,7 @@ limo_autonomous_drive:
     slalom_obstacle_distance: 0.75
     slalom_min_gap_indices: 5
     slalom_kp: 1.0
-    slalom_speed: 0.45
+    slalom_speed: 0.25
     slalom_lane_mix: 0.35
     enable_depth_obstacle: true
     depth_timeout_sec: 0.7
