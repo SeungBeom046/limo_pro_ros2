@@ -61,7 +61,7 @@ ros2 run limo_test autonomous_drive --ros-args --params-file ~/wego_ws/src/limo_
 
 ## 사용하는 토픽
 
-- Subscribe: `/camera/image_raw` (`sensor_msgs/Image`)
+- Subscribe: `/camera/color/image_raw` (`sensor_msgs/Image`)
 - Subscribe: `/scan` (`sensor_msgs/LaserScan`)
 - Publish: `/cmd_vel` (`geometry_msgs/Twist`)
 - Publish: `/limo/autonomy/debug_image` (`sensor_msgs/Image`)
@@ -76,7 +76,9 @@ ros2 run limo_test autonomous_drive --ros-args --params-file ~/wego_ws/src/limo_
    회피합니다.
 5. 라이다 전방 장애물이 `stop_distance` 안에 들어오면 전진을 멈추고 더 넓은
    방향으로 제자리 회전합니다.
-6. 카메라 또는 라이다 데이터가 끊기면 속도를 낮추거나 정지합니다.
+6. 차선이 안 보이면 `lane_lost_speed`로 저속 전진 탐색을 하며 라이다 안전
+   로직은 계속 적용합니다.
+7. 카메라 또는 라이다 데이터가 끊기면 속도를 낮추거나 정지합니다.
 
 ## 튜닝 순서
 
@@ -84,7 +86,8 @@ ros2 run limo_test autonomous_drive --ros-args --params-file ~/wego_ws/src/limo_
 2. `debug_image_topic`을 보면서 `roi_top_ratio`, `min_lane_area`를 맞춥니다.
 3. 차선 중심이 흔들리면 `kd`를 조금 올리고, 반응이 너무 강하면 `kp`를 낮춥니다.
 4. 장애물 회피가 늦으면 `slow_distance`, `stop_distance`를 키웁니다.
-5. 실차 첫 주행은 `max_speed: 0.15` 정도로 낮춘 뒤 점진적으로 올립니다.
+5. 차선이 없는 바닥에서 너무 빠르면 `lane_lost_speed`를 낮춥니다.
+6. 실차 첫 주행이 불안하면 `max_speed: 0.25` 정도로 낮춘 뒤 점진적으로 올립니다.
 
 ## 안전 메모
 

@@ -21,7 +21,7 @@ class LaneResult:
     # 카메라 한 프레임에서 추정한 차선 상태입니다.
     # center_error: -1.0~1.0 범위.
     # 양수면 차선 중심이 화면 왼쪽에 있어 우회전 보정.
-    # confidence: 차선 검출 신뢰도. 낮으면 안전하게 정지합니다.
+    # confidence: 차선 검출 신뢰도. 낮으면 라이다 기반 저속 탐색으로 전환합니다.
     center_error: float
     confidence: float
     left_x: Optional[float]
@@ -36,17 +36,20 @@ class LimoAutonomousDrive(Node):
 
         # 토픽 이름은 LIMO 세팅마다 조금씩 다를 수 있어
         # 파라미터로 열어둡니다.
-        self.declare_parameter("image_topic", "/camera/image_raw")
+        self.declare_parameter("image_topic", "/camera/color/image_raw")
         self.declare_parameter("scan_topic", "/scan")
         self.declare_parameter("cmd_vel_topic", "/cmd_vel")
         self.declare_parameter("debug_image_topic", "/limo/autonomy/debug_image")
         self.declare_parameter("publish_debug_image", True)
+        self.declare_parameter("publish_drive_log", True)
+        self.declare_parameter("drive_log_period_sec", 0.5)
 
-        # 속도는 실차 첫 주행 기준으로 보수적으로 잡았습니다.
+        # 속도는 실차 주행 기준으로 너무 답답하지 않게 잡되,
+        # 장애물이나 차선 신뢰도에 따라 아래에서 자동으로 줄입니다.
         self.declare_parameter("control_rate_hz", 20.0)
-        self.declare_parameter("max_speed", 0.35)
-        self.declare_parameter("min_speed", 0.08)
-        self.declare_parameter("caution_speed", 0.12)
+        self.declare_parameter("max_speed", 0.45)
+        self.declare_parameter("min_speed", 0.12)
+        self.declare_parameter("caution_speed", 0.18)
         self.declare_parameter("max_angular", 1.35)
 
         # 차선 중심 오차를 조향값으로 바꾸는 PID 계수입니다.
@@ -63,6 +66,14 @@ class LimoAutonomousDrive(Node):
         self.declare_parameter("expected_lane_width_ratio", 0.48)
         self.declare_parameter("single_lane_offset_ratio", 0.24)
         self.declare_parameter("min_lane_area", 180)
+        self.declare_parameter("max_lane_area_ratio", 0.18)
+        self.declare_parameter("min_lane_confidence", 0.05)
+
+        # 차선이 안 잡혀도 실내 바닥에서 바로 멈추지 않도록 하는 탐색 모드입니다.
+        # 라이다가 안전하면 저속으로 전진하고, 가까운 장애물은 기존 회피 로직을 씁니다.
+        self.declare_parameter("enable_lane_lost_drive", True)
+        self.declare_parameter("lane_lost_speed", 0.16)
+        self.declare_parameter("lane_lost_steering_decay", 0.45)
 
         # 라이다는 전방과 좌/우 측면 섹터로 나누어
         # 가장 가까운 장애물을 봅니다.
@@ -111,10 +122,12 @@ class LimoAutonomousDrive(Node):
         self.latest_lane: Optional[LaneResult] = None
         self.latest_scan: Optional[LaserScan] = None
         self.latest_debug_image = None
+        self.last_obstacle_distances = (float("inf"), float("inf"), float("inf"))
         self.last_image_time = None
         self.last_scan_time = None
 
         self.prev_error = 0.0
+        self.last_steering = 0.0
         self.integral = 0.0
         self.prev_time = self.get_clock().now()
 
@@ -165,6 +178,11 @@ class LimoAutonomousDrive(Node):
 
     def mask_to_lane_result(self, mask, width: int) -> LaneResult:
         min_area = int(self.get_parameter("min_lane_area").value)
+        max_area = int(
+            mask.shape[0]
+            * mask.shape[1]
+            * float(self.get_parameter("max_lane_area_ratio").value)
+        )
         expected_lane_width = width * float(
             self.get_parameter("expected_lane_width_ratio").value
         )
@@ -183,6 +201,10 @@ class LimoAutonomousDrive(Node):
         for label in range(1, num_labels):
             area = stats[label, cv2.CC_STAT_AREA]
             if area < min_area:
+                continue
+            # 흰 책상/밝은 바닥처럼 화면을 크게 덮는 영역은 차선이 아니라
+            # 배경일 가능성이 커서 버립니다.
+            if area > max_area:
                 continue
             x, y = centroids[label]
             score = area * (1.0 + y / max(mask.shape[0], 1))
@@ -266,15 +288,32 @@ class LimoAutonomousDrive(Node):
             return
 
         lane = self.latest_lane
-        if lane is None or lane.confidence <= 0.01:
-            self.publish_stop("Lane not detected")
-            return
-
         dt = max((now - self.prev_time).nanoseconds / 1e9, 1e-3)
         self.prev_time = now
 
-        steering = self.pid_steering(lane.center_error, dt)
-        speed = self.speed_from_lane(lane, steering)
+        min_confidence = float(self.get_parameter("min_lane_confidence").value)
+        lane_valid = lane is not None and lane.confidence >= min_confidence
+        drive_state = "lane_follow"
+
+        if lane_valid:
+            steering = self.pid_steering(lane.center_error, dt)
+            speed = self.speed_from_lane(lane, steering)
+            self.last_steering = steering
+        elif bool(self.get_parameter("enable_lane_lost_drive").value):
+            # 차선이 안 보이는 바닥에서는 라이다를 믿고 천천히 앞으로 탐색합니다.
+            # 직전에 돌던 방향은 조금만 남겨 급격한 방향 전환을 피합니다.
+            decay = float(self.get_parameter("lane_lost_steering_decay").value)
+            steering = self.last_steering * decay
+            speed = float(self.get_parameter("lane_lost_speed").value)
+            self.integral = 0.0
+            drive_state = "lane_lost"
+            self.get_logger().warn(
+                "Lane not detected. Driving slowly with lidar safety.",
+                throttle_duration_sec=1.0,
+            )
+        else:
+            self.publish_stop("Lane not detected")
+            return
 
         # 장애물 회피는 차선 추종보다 우선순위가 높습니다.
         # 가까운 장애물은 정지+회전,
@@ -286,18 +325,22 @@ class LimoAutonomousDrive(Node):
             if mode == "stop_turn":
                 speed = obstacle_speed
                 steering = obstacle_steering
+                drive_state = mode
             elif mode == "slow_avoid":
                 speed = min(speed, obstacle_speed)
                 steering += obstacle_steering
+                drive_state = mode
         else:
             # 라이다가 잠시 끊겼을 때 완전 정지 대신
             # 저속 제한을 걸어 회복 여지를 둡니다.
             speed = min(speed, float(self.get_parameter("caution_speed").value))
+            drive_state = "scan_timeout"
 
         max_angular = float(self.get_parameter("max_angular").value)
         msg.linear.x = float(max(speed, 0.0))
         msg.angular.z = float(np.clip(steering, -max_angular, max_angular))
         self.cmd_pub.publish(msg)
+        self.log_drive_status(msg, lane, lane_valid, drive_state, scan_ok)
 
         if (
             self.bridge is not None
@@ -337,6 +380,7 @@ class LimoAutonomousDrive(Node):
         front = self.sector_min(scan, -front_angle, front_angle)
         left = self.sector_min(scan, front_angle, side_angle)
         right = self.sector_min(scan, -side_angle, -front_angle)
+        self.last_obstacle_distances = (front, left, right)
 
         stop_distance = float(self.get_parameter("stop_distance").value)
         slow_distance = float(self.get_parameter("slow_distance").value)
@@ -393,6 +437,43 @@ class LimoAutonomousDrive(Node):
         except Exception as exc:
             self.get_logger().warn(f"Failed to publish stop command: {exc}")
         self.get_logger().warn(reason, throttle_duration_sec=1.0)
+
+    def log_drive_status(
+        self,
+        msg: Twist,
+        lane: Optional[LaneResult],
+        lane_valid: bool,
+        drive_state: str,
+        scan_ok: bool,
+    ):
+        if not bool(self.get_parameter("publish_drive_log").value):
+            return
+
+        front, left, right = self.last_obstacle_distances
+        lane_error = lane.center_error if lane is not None else 0.0
+        lane_confidence = lane.confidence if lane is not None else 0.0
+
+        self.get_logger().info(
+            "drive "
+            f"state={drive_state} "
+            f"speed={msg.linear.x:.2f}m/s "
+            f"steer={msg.angular.z:.2f}rad/s "
+            f"lane_ok={lane_valid} "
+            f"lane_err={lane_error:+.2f} "
+            f"lane_conf={lane_confidence:.2f} "
+            f"scan_ok={scan_ok} "
+            f"front={self.format_distance(front)}m "
+            f"left={self.format_distance(left)}m "
+            f"right={self.format_distance(right)}m",
+            throttle_duration_sec=float(
+                self.get_parameter("drive_log_period_sec").value
+            ),
+        )
+
+    def format_distance(self, value: float) -> str:
+        if not math.isfinite(value):
+            return "inf"
+        return f"{value:.2f}"
 
 
 def main(args=None):

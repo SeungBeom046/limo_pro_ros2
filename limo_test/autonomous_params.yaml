@@ -5,11 +5,13 @@ limo_autonomous_drive:
     cmd_vel_topic: /cmd_vel
     debug_image_topic: /limo/autonomy/debug_image
     publish_debug_image: true
+    publish_drive_log: true
+    drive_log_period_sec: 0.5
 
     control_rate_hz: 20.0
-    max_speed: 0.35
-    min_speed: 0.08
-    caution_speed: 0.12
+    max_speed: 0.45
+    min_speed: 0.12
+    caution_speed: 0.18
     max_angular: 1.35
 
     kp: 1.45
@@ -21,6 +23,12 @@ limo_autonomous_drive:
     expected_lane_width_ratio: 0.48
     single_lane_offset_ratio: 0.24
     min_lane_area: 180
+    max_lane_area_ratio: 0.18
+    min_lane_confidence: 0.05
+
+    enable_lane_lost_drive: true
+    lane_lost_speed: 0.16
+    lane_lost_steering_decay: 0.45
 
     front_sector_deg: 28.0
     side_sector_deg: 55.0
