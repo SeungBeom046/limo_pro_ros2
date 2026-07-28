@@ -21,6 +21,8 @@ def generate_launch_description():
     depth_topic = LaunchConfiguration("depth_topic")
     scan_topic = LaunchConfiguration("scan_topic")
     cmd_vel_topic = LaunchConfiguration("cmd_vel_topic")
+    image_qos = LaunchConfiguration("image_qos")
+    depth_qos = LaunchConfiguration("depth_qos")
 
     return LaunchDescription(
         [
@@ -49,6 +51,16 @@ def generate_launch_description():
                 default_value="/cmd_vel",
                 description="Velocity command topic.",
             ),
+            DeclareLaunchArgument(
+                "image_qos",
+                default_value="auto",
+                description="Image QoS: auto, reliable, or best_effort.",
+            ),
+            DeclareLaunchArgument(
+                "depth_qos",
+                default_value="auto",
+                description="Depth QoS: auto, reliable, or best_effort.",
+            ),
             Node(
                 package=package_name,
                 executable="autonomous_drive",
@@ -61,6 +73,8 @@ def generate_launch_description():
                         "depth_topic": depth_topic,
                         "scan_topic": scan_topic,
                         "cmd_vel_topic": cmd_vel_topic,
+                        "image_qos": image_qos,
+                        "depth_qos": depth_qos,
                     },
                 ],
             ),

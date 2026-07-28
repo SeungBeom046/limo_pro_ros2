@@ -7,7 +7,12 @@ import numpy as np
 import rclpy
 from geometry_msgs.msg import Twist
 from rclpy.node import Node
-from rclpy.qos import qos_profile_sensor_data
+from rclpy.qos import (
+    HistoryPolicy,
+    QoSProfile,
+    ReliabilityPolicy,
+    qos_profile_sensor_data,
+)
 from sensor_msgs.msg import Image, LaserScan
 
 try:
@@ -69,6 +74,8 @@ class LimoAutonomousDrive(Node):
         self.declare_parameter("drive_log_period_sec", 0.5)
         self.declare_parameter("publish_lane_log", False)
         self.declare_parameter("lane_log_period_sec", 0.5)
+        self.declare_parameter("image_qos", "auto")
+        self.declare_parameter("depth_qos", "auto")
 
         # 속도는 실차 주행 기준으로 너무 답답하지 않게 잡되,
         # 장애물이나 차선 신뢰도에 따라 아래에서 자동으로 줄입니다.
@@ -193,19 +200,29 @@ class LimoAutonomousDrive(Node):
 
         # 카메라와 라이다 콜백은 최신 센서 상태만 저장하고,
         # 실제 주행 명령 계산은 control_loop에서 주기적으로 수행합니다.
-        self.create_subscription(
-            Image,
-            self.image_topic,
-            self.image_callback,
-            qos_profile_sensor_data,
-        )
-        self.create_subscription(
-            Image,
-            self.depth_topic,
-            self.depth_callback,
-            qos_profile_sensor_data,
-        )
-        self.create_subscription(
+        self.image_subs = []
+        for qos_profile in self.image_qos_profiles("image_qos"):
+            self.image_subs.append(
+                self.create_subscription(
+                    Image,
+                    self.image_topic,
+                    self.image_callback,
+                    qos_profile,
+                )
+            )
+
+        self.depth_subs = []
+        for qos_profile in self.image_qos_profiles("depth_qos"):
+            self.depth_subs.append(
+                self.create_subscription(
+                    Image,
+                    self.depth_topic,
+                    self.depth_callback,
+                    qos_profile,
+                )
+            )
+
+        self.scan_sub = self.create_subscription(
             LaserScan,
             self.scan_topic,
             self.scan_callback,
@@ -240,6 +257,27 @@ class LimoAutonomousDrive(Node):
             f"scan={self.scan_topic}, "
             f"cmd={self.cmd_vel_topic}"
         )
+
+    def image_qos_profiles(self, parameter_name: str):
+        mode = str(self.get_parameter(parameter_name).value).lower()
+        reliable = QoSProfile(
+            history=HistoryPolicy.KEEP_LAST,
+            depth=10,
+            reliability=ReliabilityPolicy.RELIABLE,
+        )
+        best_effort = QoSProfile(
+            history=HistoryPolicy.KEEP_LAST,
+            depth=10,
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+        )
+
+        if mode == "reliable":
+            return [reliable]
+        if mode == "best_effort":
+            return [best_effort]
+
+        # auto: 카메라 드라이버마다 RELIABLE/BEST_EFFORT가 달라서 둘 다 엽니다.
+        return [reliable, best_effort]
 
     def image_callback(self, msg: Image):
         if self.bridge is None:

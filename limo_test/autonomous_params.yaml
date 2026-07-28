@@ -10,6 +10,8 @@ limo_autonomous_drive:
     drive_log_period_sec: 0.5
     publish_lane_log: false
     lane_log_period_sec: 0.5
+    image_qos: auto
+    depth_qos: auto
 
     control_rate_hz: 20.0
     max_speed: 1.20

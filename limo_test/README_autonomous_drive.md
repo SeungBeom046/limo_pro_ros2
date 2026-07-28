@@ -30,6 +30,13 @@ ros2 launch limo_test autonomous_drive.launch.py \
 ros2 launch limo_test autonomous_drive.launch.py image_topic:=/camera/color/image_raw depth_topic:=/camera/depth/image_raw scan_topic:=/scan cmd_vel_topic:=/cmd_vel
 ```
 
+카메라가 안 들어오면 `image_qos`, `depth_qos`를 바꿔봅니다. 기본값 `auto`는
+`reliable`과 `best_effort` subscription을 둘 다 열어 카메라 QoS 차이를 흡수합니다.
+
+```bash
+ros2 launch limo_test autonomous_drive.launch.py image_qos:=best_effort depth_qos:=best_effort
+```
+
 ## 실행: ros2 run
 
 워크스페이스와 ROS 환경을 먼저 source 합니다.
