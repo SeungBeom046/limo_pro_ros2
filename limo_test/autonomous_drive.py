@@ -388,7 +388,10 @@ class LimoAutonomousDrive(Node):
         return age <= float(self.get_parameter(timeout_param).value)
 
     def publish_stop(self, reason: str):
-        self.cmd_pub.publish(Twist())
+        try:
+            self.cmd_pub.publish(Twist())
+        except Exception as exc:
+            self.get_logger().warn(f"Failed to publish stop command: {exc}")
         self.get_logger().warn(reason, throttle_duration_sec=1.0)
 
 
@@ -400,9 +403,18 @@ def main(args=None):
     except KeyboardInterrupt:
         pass
     finally:
-        node.cmd_pub.publish(Twist())
+        # Ctrl-C 시점에 rclpy context가 먼저 종료되는 경우가 있습니다.
+        # 그 상태에서 publish하면 RCLError가 나므로 context가 살아있을 때만
+        # 마지막 정지 명령을 보냅니다.
+        if rclpy.ok():
+            try:
+                node.cmd_pub.publish(Twist())
+                rclpy.spin_once(node, timeout_sec=0.05)
+            except Exception as exc:
+                node.get_logger().warn(f"Failed to publish final stop: {exc}")
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == "__main__":

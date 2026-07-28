@@ -23,6 +23,12 @@ ros2 launch limo_test autonomous_drive.launch.py \
   cmd_vel_topic:=/cmd_vel
 ```
 
+줄바꿈이 헷갈리면 한 줄로 실행하는 것이 가장 안전합니다.
+
+```bash
+ros2 launch limo_test autonomous_drive.launch.py image_topic:=/camera/color/image_raw scan_topic:=/scan cmd_vel_topic:=/cmd_vel
+```
+
 ## 실행: ros2 run
 
 워크스페이스와 ROS 환경을 먼저 source 합니다.
@@ -42,6 +48,16 @@ ros2 run limo_test autonomous_drive --ros-args \
   -p scan_topic:=/scan \
   -p cmd_vel_topic:=/cmd_vel
 ```
+
+한 줄 실행:
+
+```bash
+ros2 run limo_test autonomous_drive --ros-args --params-file ~/wego_ws/src/limo_test/limo_test/autonomous_params.yaml -p image_topic:=/camera/color/image_raw -p scan_topic:=/scan -p cmd_vel_topic:=/cmd_vel
+```
+
+여러 줄로 실행할 때는 `\` 뒤에 공백을 넣으면 안 됩니다. `\ `처럼 공백이
+붙으면 다음 줄의 `--ros-args`, `-p`, `--params-file`이 별도 bash 명령으로
+실행됩니다.
 
 ## 사용하는 토픽
 
