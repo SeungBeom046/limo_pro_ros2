@@ -68,8 +68,8 @@ limo_autonomous_drive:
     enable_camera_low_obstacle: false
 
     enable_lane_lost_drive: true
-    lane_lost_speed: 0.80
-    lane_lost_min_speed: 0.80
+    lane_lost_speed: 0.50
+    lane_lost_min_speed: 0.50
     lane_lost_steering_decay: 0.45
     lane_lost_use_lidar: true
     lane_lost_lidar_angle_deg: 95.0
@@ -78,20 +78,20 @@ limo_autonomous_drive:
     lane_lost_gap_gain: 0.85
     lane_lost_obstacle_gain: 0.75
 
-    aeb_sector_deg: 35.0
+    aeb_sector_deg: 45.0
     front_sector_deg: 45.0
     side_sector_deg: 100.0
     closest_sample_count: 1
-    aeb_distance: 0.20
+    aeb_distance: 0.35
     enable_aeb_recovery: true
-    aeb_recovery_clear_distance: 0.32
+    aeb_recovery_clear_distance: 0.45
     aeb_recovery_reverse_sec: 0.7
     aeb_recovery_turn_sec: 0.6
     aeb_recovery_reverse_speed: -0.18
     aeb_recovery_turn_speed: 0.05
     aeb_recovery_turn_angular: 0.85
-    stop_distance: 0.34
-    slow_distance: 0.95
+    stop_distance: 0.50
+    slow_distance: 1.20
     side_obstacle_distance: 0.34
     tunnel_side_distance: 0.70
     tunnel_balance_tolerance: 0.28
@@ -103,7 +103,7 @@ limo_autonomous_drive:
     slalom_obstacle_distance: 0.75
     slalom_min_gap_indices: 5
     slalom_kp: 1.0
-    slalom_speed: 0.80
+    slalom_speed: 0.50
     slalom_lane_mix: 0.35
     enable_depth_obstacle: false
     depth_timeout_sec: 0.7

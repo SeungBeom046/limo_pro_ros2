@@ -93,7 +93,7 @@ ros2 run limo_test autonomous_drive --ros-args --params-file ~/wego_ws/src/limo_
    회피합니다.
 8. 라이다 전방 장애물이 `stop_distance` 안에 들어오면 AEB 전까지는 저속으로
    더 넓은 방향을 향해 회피합니다.
-9. 라이다 전방 20cm 이내는 AEB로 즉시 정지한 뒤, 옵션이 켜져 있으면 짧게
+9. 라이다 전방 35cm 이내는 AEB로 즉시 정지한 뒤, 옵션이 켜져 있으면 짧게
    후진하고 열린 쪽으로 저속 선회해 다시 길을 찾습니다.
 10. 터널에서는 양쪽 라이다 벽을 장애물이 아니라 통로 벽으로 보고 중앙을 유지합니다.
 11. 여러 장애물이 있으면 전방 ±90도 라이다 범위에서 좌측 바깥, 장애물 사이 틈,
@@ -123,10 +123,11 @@ ros2 run limo_test autonomous_drive --ros-args --params-file ~/wego_ws/src/limo_
 7. 책상 다리 같은 얇은 장애물을 놓치면 `side_obstacle_distance`를 키우거나
    `closest_sample_count`를 `1`로 유지합니다.
 8. AEB가 너무 민감하면 `aeb_sector_deg`를 줄이고, 너무 늦으면 `aeb_distance`를
-   `0.25` 정도로 키웁니다.
+   키웁니다. 검은색 장애물에 늦게 반응하면 `aeb_distance`, `stop_distance`,
+   `slow_distance`를 먼저 올립니다.
    AEB 후진 복구가 과하면 `enable_aeb_recovery: false`로 끄거나
    `aeb_recovery_reverse_speed`, `aeb_recovery_reverse_sec`를 낮춥니다.
-9. 차선이 없는 바닥에서는 기본 `lane_lost_speed: 0.80`으로 라이다 fallback
+9. 차선이 없는 바닥에서는 기본 `lane_lost_speed: 0.50`으로 라이다 fallback
    주행을 합니다. 너무 빠르면 `lane_lost_speed`를 낮춥니다. 라이다
    fallback이 너무 크게 꺾으면 `lane_lost_gap_gain`, `lane_lost_obstacle_gain`을
    낮춥니다.
@@ -146,7 +147,7 @@ ros2 run limo_test autonomous_drive --ros-args --params-file ~/wego_ws/src/limo_
 
 ```text
 차선: 인식 | AEB: 미작동 | 속도: 1.40m/s
-차선: 미인식 | AEB: 미작동 | 속도: 0.80m/s
+차선: 미인식 | AEB: 미작동 | 속도: 0.50m/s
 차선: 미인식 | AEB: 작동 | 속도: 0.00m/s
 ```
 
