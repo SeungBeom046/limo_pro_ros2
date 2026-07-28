@@ -89,11 +89,13 @@ ros2 run limo_test autonomous_drive --ros-args --params-file ~/wego_ws/src/limo_
 5. `lookahead_ratio` 위치의 좌우 차선 중앙을 주행 목표로 잡고, 한쪽만 보일 때는
    원근 기반 예상 차선 폭으로 중앙을 추정합니다.
 6. 중심 오차를 PID 제어로 조향값에 반영합니다.
+   차선이 순간적으로 끊기면 `lane_hold_time_sec` 동안 마지막 정상 차선 방향을
+   유지해 갑자기 직진으로 풀리는 현상을 줄입니다.
 7. 라이다 전방 장애물이 `slow_distance` 안에 들어오면 감속하며 빈 공간 쪽으로
    회피합니다.
 8. 라이다 전방 장애물이 `stop_distance` 안에 들어오면 AEB 전까지는 저속으로
    더 넓은 방향을 향해 회피합니다.
-9. 라이다 전방 35cm 이내는 AEB로 즉시 정지한 뒤, 옵션이 켜져 있으면 짧게
+9. 라이다 전방 15cm 이내는 AEB로 즉시 정지한 뒤, 옵션이 켜져 있으면 짧게
    후진하고 열린 쪽으로 저속 선회해 다시 길을 찾습니다.
 10. 터널에서는 양쪽 라이다 벽을 장애물이 아니라 통로 벽으로 보고 중앙을 유지합니다.
 11. 여러 장애물이 있으면 전방 ±90도 라이다 범위에서 좌측 바깥, 장애물 사이 틈,
@@ -115,6 +117,8 @@ ros2 run limo_test autonomous_drive --ros-args --params-file ~/wego_ws/src/limo_
    트랙 위에서 차선이 계속 미인식이면 먼저 `black_road_value_max`를 130~150까지
    올리고, 흰 선이 끊겨 보이면 `white_lane_value_min`을 95~105 범위에서 낮춥니다.
 3. 차선 중심이 흔들리면 `kd`를 조금 올리고, 반응이 너무 강하면 `kp`를 낮춥니다.
+   트래킹 중 갑자기 직진하면 `lane_hold_time_sec`를 조금 올리고,
+   잘못된 선을 오래 따라가면 `lane_hold_time_sec`를 낮춥니다.
 4. 장애물 회피가 늦으면 `slow_distance`, `stop_distance`를 키웁니다.
 5. 터널에서 벽 때문에 튀면 `tunnel_side_distance`와 `tunnel_balance_tolerance`를
    코스 폭에 맞춥니다.

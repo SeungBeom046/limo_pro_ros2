@@ -94,14 +94,14 @@ class LimoAutonomousDrive(Node):
         self.declare_parameter("straight_min_speed", 1.40)
         self.declare_parameter("straight_steering_threshold", 0.25)
         self.declare_parameter("max_angular", 1.35)
-        self.declare_parameter("steering_smoothing", 0.35)
+        self.declare_parameter("steering_smoothing", 0.22)
 
         # 차선 중심 오차를 조향값으로 바꾸는 PID 계수입니다.
         # 흔들리면 kd를 올리고,
         # 반응이 과하면 kp를 낮추는 순서로 튜닝하세요.
-        self.declare_parameter("kp", 1.45)
+        self.declare_parameter("kp", 1.70)
         self.declare_parameter("ki", 0.0)
-        self.declare_parameter("kd", 0.18)
+        self.declare_parameter("kd", 0.22)
         self.declare_parameter("integral_limit", 0.45)
 
         # 중간 시야부터 아래까지 보면서
@@ -114,18 +114,22 @@ class LimoAutonomousDrive(Node):
         self.declare_parameter("single_lane_offset_ratio", 0.24)
         self.declare_parameter("min_lane_area", 180)
         self.declare_parameter("max_lane_area_ratio", 0.18)
-        self.declare_parameter("min_lane_confidence", 0.30)
+        self.declare_parameter("min_lane_confidence", 0.25)
+        self.declare_parameter("lane_hold_time_sec", 0.60)
+        self.declare_parameter("lane_hold_speed", 0.75)
+        self.declare_parameter("lane_hold_min_confidence", 0.12)
+        self.declare_parameter("max_lane_error_step", 0.35)
         self.declare_parameter("white_lane_value_min", 105)
         self.declare_parameter("white_lane_saturation_max", 170)
         self.declare_parameter("white_lane_relative_margin", 28)
         self.declare_parameter("lane_search_band_count", 9)
         self.declare_parameter("lane_search_band_height", 20)
         self.declare_parameter("lane_min_band_pixels", 8)
-        self.declare_parameter("min_lane_band_count", 3)
+        self.declare_parameter("min_lane_band_count", 2)
         self.declare_parameter("lane_histogram_margin_ratio", 0.08)
         self.declare_parameter("max_lane_peak_width_ratio", 0.09)
         self.declare_parameter("max_lane_x_std_ratio", 0.14)
-        self.declare_parameter("max_lane_band_jump_ratio", 0.16)
+        self.declare_parameter("max_lane_band_jump_ratio", 0.22)
         self.declare_parameter("lane_pair_width_tolerance_ratio", 0.24)
         self.declare_parameter("lane_pair_center_prior_ratio", 0.28)
         self.declare_parameter("min_lane_width_ratio", 0.18)
@@ -166,7 +170,7 @@ class LimoAutonomousDrive(Node):
         self.declare_parameter("front_sector_deg", 45.0)
         self.declare_parameter("side_sector_deg", 100.0)
         self.declare_parameter("closest_sample_count", 1)
-        self.declare_parameter("aeb_distance", 0.35)
+        self.declare_parameter("aeb_distance", 0.15)
         self.declare_parameter("enable_aeb_recovery", True)
         self.declare_parameter("aeb_recovery_clear_distance", 0.45)
         self.declare_parameter("aeb_recovery_reverse_sec", 0.7)
@@ -273,6 +277,9 @@ class LimoAutonomousDrive(Node):
 
         self.prev_error = 0.0
         self.last_steering = 0.0
+        self.last_lane_error = 0.0
+        self.last_lane_confidence = 0.0
+        self.last_lane_seen_time = None
         self.integral = 0.0
         self.prev_time = self.get_clock().now()
         self.aeb_recovery_active = False
@@ -1048,7 +1055,11 @@ class LimoAutonomousDrive(Node):
         drive_state = "lane_follow"
 
         if lane_valid:
-            raw_steering = self.pid_steering(lane.center_error, dt)
+            lane_error = self.stable_lane_error(lane.center_error)
+            self.last_lane_error = lane_error
+            self.last_lane_confidence = lane.confidence
+            self.last_lane_seen_time = now
+            raw_steering = self.pid_steering(lane_error, dt)
             smoothing = float(self.get_parameter("steering_smoothing").value)
             steering = (
                 (1.0 - smoothing) * raw_steering
@@ -1056,6 +1067,22 @@ class LimoAutonomousDrive(Node):
             )
             speed = self.speed_from_lane(lane, steering)
             self.last_steering = steering
+        elif self.can_hold_lane(now, lane):
+            # 차선이 한두 프레임 끊기면 바로 직진/lidar fallback으로 넘기지 않고
+            # 마지막으로 신뢰했던 차선 오차를 짧게 유지합니다.
+            lane_valid = True
+            raw_steering = self.pid_steering(self.last_lane_error, dt)
+            smoothing = float(self.get_parameter("steering_smoothing").value)
+            steering = (
+                (1.0 - smoothing) * raw_steering
+                + smoothing * self.last_steering
+            )
+            speed = min(
+                self.speed_from_lane(lane, steering),
+                float(self.get_parameter("lane_hold_speed").value),
+            )
+            self.last_steering = steering
+            drive_state = "lane_hold"
         elif (
             lane is not None
             and not lane.camera_valid
@@ -1287,7 +1314,7 @@ class LimoAutonomousDrive(Node):
         turn_sec = float(self.get_parameter("aeb_recovery_turn_sec").value)
 
         if elapsed < reverse_sec:
-            # AEB 직후에는 우선 직선 후진으로 20cm 안전거리에서 벗어납니다.
+            # AEB 직후에는 우선 직선 후진으로 긴급 정지 거리에서 벗어납니다.
             return (
                 float(self.get_parameter("aeb_recovery_reverse_speed").value),
                 0.0,
@@ -1340,6 +1367,34 @@ class LimoAutonomousDrive(Node):
         derivative = (error - self.prev_error) / dt
         self.prev_error = error
         return kp * error + ki * self.integral + kd * derivative
+
+    def stable_lane_error(self, error: float) -> float:
+        max_step = float(self.get_parameter("max_lane_error_step").value)
+        if self.last_lane_seen_time is None:
+            return error
+
+        delta = float(np.clip(error - self.last_lane_error, -max_step, max_step))
+        return float(np.clip(self.last_lane_error + delta, -1.0, 1.0))
+
+    def can_hold_lane(self, now, lane: Optional[LaneResult]) -> bool:
+        if self.last_lane_seen_time is None or lane is None:
+            return False
+        if not lane.camera_valid:
+            return False
+
+        hold_time = float(self.get_parameter("lane_hold_time_sec").value)
+        age = (now - self.last_lane_seen_time).nanoseconds / 1e9
+        if age > hold_time:
+            return False
+
+        min_hold_confidence = float(
+            self.get_parameter("lane_hold_min_confidence").value
+        )
+        return (
+            lane.confidence >= min_hold_confidence
+            or lane.geometry_valid
+            or lane.road_valid
+        )
 
     def speed_from_lane(self, lane: LaneResult, steering: float) -> float:
         max_speed = float(self.get_parameter("max_speed").value)
@@ -1441,7 +1496,7 @@ class LimoAutonomousDrive(Node):
         caution_speed = float(self.get_parameter("caution_speed").value)
 
         if aeb_front < aeb_distance:
-            # AEB: 전방 20cm 이내는 조향보다 정지가 우선입니다.
+            # AEB: 전방 15cm 이내는 조향보다 정지와 후진 복구가 우선입니다.
             return 0.0, 0.0, "aeb_stop"
 
         if front < stop_distance:

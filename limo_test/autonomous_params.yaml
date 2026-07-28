@@ -21,11 +21,11 @@ limo_autonomous_drive:
     straight_min_speed: 1.40
     straight_steering_threshold: 0.25
     max_angular: 1.35
-    steering_smoothing: 0.35
+    steering_smoothing: 0.22
 
-    kp: 1.45
+    kp: 1.70
     ki: 0.0
-    kd: 0.18
+    kd: 0.22
     integral_limit: 0.45
 
     roi_top_ratio: 0.38
@@ -36,18 +36,22 @@ limo_autonomous_drive:
     single_lane_offset_ratio: 0.24
     min_lane_area: 180
     max_lane_area_ratio: 0.18
-    min_lane_confidence: 0.30
+    min_lane_confidence: 0.25
+    lane_hold_time_sec: 0.60
+    lane_hold_speed: 0.75
+    lane_hold_min_confidence: 0.12
+    max_lane_error_step: 0.35
     white_lane_value_min: 105
     white_lane_saturation_max: 170
     white_lane_relative_margin: 28
     lane_search_band_count: 9
     lane_search_band_height: 20
     lane_min_band_pixels: 8
-    min_lane_band_count: 3
+    min_lane_band_count: 2
     lane_histogram_margin_ratio: 0.08
     max_lane_peak_width_ratio: 0.09
     max_lane_x_std_ratio: 0.14
-    max_lane_band_jump_ratio: 0.16
+    max_lane_band_jump_ratio: 0.22
     lane_pair_width_tolerance_ratio: 0.24
     lane_pair_center_prior_ratio: 0.28
     min_lane_width_ratio: 0.18
@@ -82,7 +86,7 @@ limo_autonomous_drive:
     front_sector_deg: 45.0
     side_sector_deg: 100.0
     closest_sample_count: 1
-    aeb_distance: 0.35
+    aeb_distance: 0.15
     enable_aeb_recovery: true
     aeb_recovery_clear_distance: 0.45
     aeb_recovery_reverse_sec: 0.7
