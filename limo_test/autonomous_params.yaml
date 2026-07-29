@@ -42,6 +42,7 @@ limo_autonomous_drive:
     scan_timeout_sec: 0.7
     depth_timeout_sec: 0.7
     low_obstacle_speed: 0.10
+    camera_obstacle_avoid_gain: 0.45
 
     # Camera lane detection: camera_lane_detector.py
     roi_top_ratio: 0.38
@@ -82,7 +83,7 @@ limo_autonomous_drive:
     camera_obstacle_roi_top_ratio: 0.72
     camera_obstacle_center_width_ratio: 0.46
     camera_obstacle_min_ratio: 0.06
-    enable_camera_low_obstacle: false
+    enable_camera_low_obstacle: true
 
     # Lidar obstacle avoidance: lidar_obstacle_avoidance.py
     lane_lost_speed: 0.50
@@ -93,24 +94,35 @@ limo_autonomous_drive:
     lane_lost_gap_gain: 0.85
     lane_lost_obstacle_gain: 0.75
     aeb_sector_deg: 45.0
+    aeb_core_sector_deg: 12.0
     front_sector_deg: 45.0
     side_sector_deg: 100.0
+    side_check_angle_deg: 90.0
+    side_check_width_deg: 15.0
     closest_sample_count: 1
-    aeb_distance: 0.15
+    aeb_distance: 0.20
     stop_distance: 0.50
     slow_distance: 1.20
     side_obstacle_distance: 0.34
+    passable_side_clearance: 0.15
+    passable_avoid_speed: 0.18
+    corner_side_guard_distance: 0.22
+    corner_guard_speed: 0.22
     tunnel_side_distance: 0.70
     tunnel_balance_tolerance: 0.28
     tunnel_centering_gain: 0.35
     avoid_gain: 0.85
     enable_aeb_recovery: true
     aeb_recovery_clear_distance: 0.45
-    aeb_recovery_reverse_sec: 0.7
-    aeb_recovery_turn_sec: 0.6
-    aeb_recovery_reverse_speed: -0.18
+    aeb_recovery_reverse_sec: 1.20
+    aeb_recovery_turn_sec: 0.75
+    aeb_recovery_escape_sec: 0.80
+    aeb_recovery_reverse_speed: -0.25
     aeb_recovery_turn_speed: 0.05
+    aeb_recovery_escape_speed: 0.18
     aeb_recovery_turn_angular: 0.85
+    aeb_escape_bias_sec: 1.50
+    aeb_escape_bias_angular: 0.45
     enable_lidar_slalom: true
     slalom_view_deg: 90.0
     slalom_obstacle_distance: 0.75

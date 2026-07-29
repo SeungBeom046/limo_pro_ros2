@@ -150,6 +150,7 @@ class LimoAutonomousDrive(Node):
         self.declare_parameter("scan_timeout_sec", 0.7)
         self.declare_parameter("depth_timeout_sec", 0.7)
         self.declare_parameter("low_obstacle_speed", 0.10)
+        self.declare_parameter("camera_obstacle_avoid_gain", 0.45)
 
     def image_qos_profiles(self, parameter_name: str):
         mode = str(self.get_parameter(parameter_name).value).lower()
@@ -238,6 +239,13 @@ class LimoAutonomousDrive(Node):
 
         if self.should_slow_for_camera_obstacle(lane, lane_valid, speed):
             speed = min(speed, float(self.get_parameter("low_obstacle_speed").value))
+            # 라이다가 고깔 상부만 봐서 늦게 반응하는 경우를 보완합니다.
+            # 카메라 하단 중앙에 도로가 아닌 물체가 보이면
+            # 그 반대 방향으로 약하게 조향을 더합니다.
+            steering += (
+                float(self.get_parameter("camera_obstacle_avoid_gain").value)
+                * lane.camera_obstacle_error
+            )
             if drive_state == "lane_follow":
                 drive_state = "camera_low_obstacle"
 
@@ -333,7 +341,7 @@ class LimoAutonomousDrive(Node):
                 speed = obstacle_speed
             return speed, obstacle_steering, mode
 
-        if mode in ("slow_avoid", "side_avoid"):
+        if mode in ("slow_avoid", "side_avoid", "corner_guard", "passable_avoid"):
             if lane_valid:
                 speed = max(
                     min(speed, obstacle_speed),
@@ -344,6 +352,9 @@ class LimoAutonomousDrive(Node):
             return speed, steering + obstacle_steering, mode
 
         if mode == "tunnel_center":
+            return speed, steering + obstacle_steering, mode
+
+        if mode == "escape_bias":
             return speed, steering + obstacle_steering, mode
 
         if mode == "slalom_gap":
@@ -519,9 +530,10 @@ class LimoAutonomousDrive(Node):
         lane_text = "인식" if lane_valid else "미인식"
         aeb_text = "작동" if drive_state.startswith("aeb") else "미작동"
         scan_text = "정상" if scan_ok else "끊김"
+        lidar_text = self.lidar.last_decision_log if scan_ok else "lidar unavailable"
         self.get_logger().info(
             f"차선: {lane_text} | 라이다: {scan_text} | "
-            f"AEB: {aeb_text} | 상태: {drive_state}",
+            f"AEB: {aeb_text} | 상태: {drive_state} | {lidar_text}",
             throttle_duration_sec=float(
                 self.get_parameter("drive_log_period_sec").value
             ),

@@ -26,6 +26,7 @@ class LaneResult:
     road_ratio: float
     camera_obstacle_ratio: float
     camera_obstacle: bool
+    camera_obstacle_error: float
     road_valid: bool
     geometry_valid: bool
     road_between_ratio: float
@@ -279,7 +280,11 @@ class OpenCVLaneDetector:
 
         mask_ratio = float(cv2.countNonZero(lane_mask)) / float(lane_mask.size)
         road_ratio = float(cv2.countNonZero(road_mask)) / float(road_mask.size)
-        camera_obstacle_ratio, camera_obstacle = self._detect_camera_obstacle(
+        (
+            camera_obstacle_ratio,
+            camera_obstacle,
+            camera_obstacle_error,
+        ) = self._detect_camera_obstacle(
             frame,
             road_mask,
             lane_mask,
@@ -347,6 +352,7 @@ class OpenCVLaneDetector:
             road_ratio=road_ratio,
             camera_obstacle_ratio=camera_obstacle_ratio,
             camera_obstacle=camera_obstacle,
+            camera_obstacle_error=camera_obstacle_error,
             road_valid=road_valid,
             geometry_valid=geometry_valid,
             road_between_ratio=road_between_ratio,
@@ -391,7 +397,7 @@ class OpenCVLaneDetector:
         right = min(width, left + center_width)
         near = frame[top:, left:right]
         if near.size == 0:
-            return 0.0, False
+            return 0.0, False, 0.0
 
         gray = cv2.cvtColor(near, cv2.COLOR_BGR2GRAY)
         non_road = cv2.bitwise_not(road_mask[top:, left:right])
@@ -400,7 +406,14 @@ class OpenCVLaneDetector:
         obstacle = cv2.bitwise_and(obstacle, cv2.inRange(gray, 55, 255))
         obstacle = cv2.morphologyEx(obstacle, cv2.MORPH_OPEN, np.ones((5, 5), np.uint8))
         ratio = float(cv2.countNonZero(obstacle)) / float(obstacle.size)
-        return ratio, ratio >= float(self._p("camera_obstacle_min_ratio"))
+        moments = cv2.moments(obstacle)
+        error = 0.0
+        if moments["m00"] > 0.0:
+            obstacle_x = moments["m10"] / moments["m00"]
+            center_x = obstacle.shape[1] / 2.0
+            error = (obstacle_x - center_x) / max(center_x, 1.0)
+            error = float(np.clip(error, -1.0, 1.0))
+        return ratio, ratio >= float(self._p("camera_obstacle_min_ratio")), error
 
     def _draw_debug(self, frame, lane_mask, roi_points, left_line, right_line, lane):
         debug = frame.copy()
@@ -462,6 +475,7 @@ class OpenCVLaneDetector:
             f"width={lane.lane_width_ratio:.2f} "
             f"cam_obs={lane.camera_obstacle_ratio * 100.0:.2f}% "
             f"cam_hit={lane.camera_obstacle} "
+            f"cam_err={lane.camera_obstacle_error:+.2f} "
             f"left={left_text} right={right_text} "
             f"left_cnt={lane.left_count} right_cnt={lane.right_count} "
             f"err={lane.center_error:+.2f} conf={lane.confidence:.2f}",

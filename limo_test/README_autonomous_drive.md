@@ -110,20 +110,28 @@ ros2 run limo_test autonomous_drive --ros-args --params-file ~/wego_ws/src/limo_
    유지해 갑자기 직진으로 풀리는 현상을 줄입니다.
 7. `lidar_obstacle_avoidance.py`가 전방 장애물이 `slow_distance` 안에 들어오면
    감속하며 빈 공간 쪽으로 회피합니다.
-8. 라이다 전방 장애물이 `stop_distance` 안에 들어오면 AEB 전까지는 저속으로
-   더 넓은 방향을 향해 회피합니다.
-9. 라이다 전방 15cm 이내는 AEB로 즉시 정지한 뒤, 옵션이 켜져 있으면 짧게
-   후진하고 열린 쪽으로 저속 선회해 다시 길을 찾습니다.
-10. 터널에서는 양쪽 라이다 벽을 장애물이 아니라 통로 벽으로 보고 중앙을 유지합니다.
-11. 여러 장애물이 있으면 전방 ±90도 라이다 범위에서 좌측 바깥, 장애물 사이 틈,
+8. AEB는 넓은 전방 ±45도 전체가 아니라 `aeb_core_sector_deg` 안의 정면 core를
+   우선 봅니다. 정면 core가 `aeb_distance` 20cm 아래이고, 3시/9시 방향 통과 폭이
+   `passable_side_clearance`보다 좁으면 급제동합니다.
+9. 3시/9시 방향이 각각 15cm 이상 열려 있으면 터널 벽이나 통과 가능한 물체가
+   전방 섹터에 섞여도 AEB를 바로 걸지 않고 `passable_avoid` 또는
+   `tunnel_center`로 통과를 시도합니다.
+10. 각진 코너에서는 3시/9시 방향이 `corner_side_guard_distance`보다 가까우면
+   `corner_guard`로 감속하고 넓은 쪽으로 조향해 옆면 충돌을 줄입니다.
+11. AEB가 작동하면 더 길게 후진한 뒤 열린 쪽으로 선회하고, 짧은 전진 원호와
+   `escape_bias`를 적용해 방금 왔던 경로로 그대로 재진입하지 않게 합니다.
+12. 터널에서는 양쪽 라이다 벽을 장애물이 아니라 통로 벽으로 보고 중앙을 유지합니다.
+13. 여러 장애물이 있으면 전방 ±90도 라이다 범위에서 좌측 바깥, 장애물 사이 틈,
    우측 바깥 중 가장 넓은 gap을 골라 `slalom_gap`으로 통과합니다.
-12. 책상 다리처럼 얇은 장애물은 섹터 퍼센타일 대신 가까운 beam 값을 사용해
+14. 책상 다리처럼 얇은 장애물은 섹터 퍼센타일 대신 가까운 beam 값을 사용해
    감지합니다.
-13. 차선이 안 보이면 `lane_lost_lidar` fallback으로 전환해 라이다 기준 열린
+15. 고깔처럼 라이다가 위쪽만 보고 하부를 늦게 잡을 수 있는 물체는 카메라 하단
+   중앙의 `camera_low_obstacle` 판단으로 미리 감속하고 약하게 피합니다.
+16. 차선이 안 보이면 `lane_lost_lidar` fallback으로 전환해 라이다 기준 열린
    방향을 찾고, 가까운 물체 반대쪽으로 조향합니다.
-14. 검은 트랙 화면은 정상 도로로 취급합니다. 화면이 거의 흰색이고 검은 도로가
+17. 검은 트랙 화면은 정상 도로로 취급합니다. 화면이 거의 흰색이고 검은 도로가
    거의 없을 때만 카메라 이상으로 판단합니다.
-15. 카메라 또는 라이다 데이터가 끊기면 속도를 낮추거나 정지합니다.
+18. 카메라 또는 라이다 데이터가 끊기면 속도를 낮추거나 정지합니다.
 
 ## 튜닝 순서
 
@@ -143,9 +151,10 @@ ros2 run limo_test autonomous_drive --ros-args --params-file ~/wego_ws/src/limo_
    낮춥니다.
 7. 책상 다리 같은 얇은 장애물을 놓치면 `side_obstacle_distance`를 키우거나
    `closest_sample_count`를 `1`로 유지합니다.
-8. AEB가 너무 민감하면 `aeb_sector_deg`를 줄이고, 너무 늦으면 `aeb_distance`를
-   키웁니다. 검은색 장애물에 늦게 반응하면 `aeb_distance`, `stop_distance`,
-   `slow_distance`를 먼저 올립니다.
+8. AEB가 너무 민감하면 `aeb_core_sector_deg`를 줄이고, 너무 늦으면
+   `aeb_distance`를 키웁니다. 현재 기본값은 정면 core 20cm입니다.
+   터널에서 멈추면 `passable_side_clearance`를 조금 낮추고, 코너 옆면을 치면
+   `corner_side_guard_distance`를 올립니다.
    AEB 후진 복구가 과하면 `enable_aeb_recovery: false`로 끄거나
    `aeb_recovery_reverse_speed`, `aeb_recovery_reverse_sec`를 낮춥니다.
 9. 차선이 없는 바닥에서는 기본 `lane_lost_speed: 0.50`으로 라이다 fallback
@@ -170,12 +179,13 @@ ros2 run limo_test autonomous_drive --ros-args --params-file ~/wego_ws/src/limo_
 차선: 인식 | 라이다: 정상 | AEB: 미작동 | 상태: lane_follow
 차선: 미인식 | 라이다: 정상 | AEB: 미작동 | 상태: lane_lost_lidar
 차선: 미인식 | 라이다: 정상 | AEB: 작동 | 상태: aeb_stop
+lidar mode=tunnel_center core=0.80m front=0.32m left90=0.21m right90=0.22m reason=side walls detected but 3/9 o'clock clearance is passable
 ```
 
 상세 차선 디버깅이 필요하면 `publish_lane_log: true`로 바꾸면 됩니다.
 
 ```text
-lane frame=640x480 mask=2.30% road=72.00% road_ok=True cam_ok=True geom_ok=True between=64.00% width=0.48 cam_obs=1.20% cam_hit=False left=185px right=462px left_cnt=5 right_cnt=5 err=-0.01 conf=0.88
+lane frame=640x480 mask=2.30% road=72.00% road_ok=True cam_ok=True geom_ok=True between=64.00% width=0.48 cam_obs=1.20% cam_hit=False cam_err=+0.00 left=185px right=462px left_cnt=5 right_cnt=5 err=-0.01 conf=0.88
 ```
 
 - `mask`: ROI 안에서 흰색 차선으로 잡힌 픽셀 비율입니다. 0에 가까우면 색상
@@ -187,6 +197,11 @@ lane frame=640x480 mask=2.30% road=72.00% road_ok=True cam_ok=True geom_ok=True 
 - 화면이 거의 전부 흰색이면 카메라 판단 불가 상태로 보고 정지합니다. 검은 도로가
   충분히 보이지 않으면 차선 신뢰도를 낮춰 라이다 fallback으로 전환합니다.
 - `cam_obs/cam_hit`: 카메라 하단 중앙의 낮은 장애물 의심 비율과 감지 여부입니다.
+- `cam_err`: 카메라 하단 장애물이 중심보다 어느 쪽에 있는지 나타냅니다.
+  고깔 하부처럼 라이다가 늦게 잡는 물체를 피하는 보조 조향에 씁니다.
+- `core/front/left90/right90`: 라이다 로그의 정면 core, 넓은 전방, 9시, 3시
+  방향 거리입니다. 터널에서는 `left90/right90`가 0.15m 이상이면 통과 가능으로
+  판단합니다.
 - `left/right`: 좌우 차선 후보의 x 위치입니다. `none`이면 해당 방향 차선을
   못 잡은 것입니다.
 - `left_cnt/right_cnt`: Hough에서 좌/우 차선으로 분류된 선분 개수입니다. 계속 0이면
