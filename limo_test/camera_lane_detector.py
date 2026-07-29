@@ -41,8 +41,8 @@ class OpenCVLaneDetector:
     1. 흰색/노란색 차선 후보를 색공간에서 추출
     2. Gaussian blur, Canny, Sobel/HLS 마스크로 후보 보강
     3. 차량 앞 바닥만 보도록 사다리꼴 ROI 적용
-    4. HoughLinesP로 선분 검출
-    5. 기울기와 위치로 좌/우 차선을 분리하고 직선 피팅
+    4. 가로 밴드별 차선 픽셀 중심을 모아 곡선 피팅
+    5. 밴드 피팅이 불안하면 HoughLinesP 직선 피팅으로 fallback
     6. lookahead 지점의 차선 중심 오차와 신뢰도 계산
     """
 
@@ -68,6 +68,7 @@ class OpenCVLaneDetector:
         self.node.declare_parameter("roi_bottom_width_ratio", 0.92)
         self.node.declare_parameter("roi_top_width_ratio", 0.18)
         self.node.declare_parameter("lookahead_ratio", 0.62)
+        self.node.declare_parameter("lane_control_y_ratio", 0.78)
 
         # 색상 필터: codingwell 글의 흰색/노란색 필터와
         # velog 글의 HLS 채널 아이디어를 같이 사용합니다.
@@ -95,6 +96,19 @@ class OpenCVLaneDetector:
         self.node.declare_parameter("hough_max_line_gap", 28)
         self.node.declare_parameter("min_lane_slope", 0.35)
         self.node.declare_parameter("max_lane_slope", 4.5)
+
+        # 곡선 차선용 밴드 피팅 파라미터.
+        # 실제 트랙처럼 굵은 흰색 커브 라인은 Hough 직선 하나로 설명하기
+        # 어려워, 화면 아래쪽부터 여러 가로 밴드에서
+        # 차선 중심을 찾습니다.
+        self.node.declare_parameter("curve_band_count", 11)
+        self.node.declare_parameter("curve_band_height", 26)
+        self.node.declare_parameter("curve_min_band_pixels", 7)
+        self.node.declare_parameter("curve_max_segment_width_ratio", 0.13)
+        self.node.declare_parameter("curve_min_points", 3)
+        self.node.declare_parameter("curve_pair_width_tolerance", 0.34)
+        self.node.declare_parameter("curve_pair_center_weight", 0.45)
+        self.node.declare_parameter("curve_hist_smooth_width", 11)
 
         # 차선 폭/신뢰도 검증.
         # 기존 YAML 키를 최대한 유지해 호환성을 지킵니다.
@@ -131,16 +145,26 @@ class OpenCVLaneDetector:
         """카메라 한 프레임에서 차선 결과와 디버그 이미지를 만듭니다.
 
         autonomous_drive.py의 image_callback()에서 매 프레임 호출됩니다.
-        내부 처리 순서는 색상 후보 마스크, edge 마스크, ROI, Hough 직선,
-        좌/우 차선 피팅, LaneResult 생성입니다.
+        내부 처리 순서는 색상 후보 마스크, ROI 안 밴드 기반 곡선 피팅,
+        실패 시 Hough fallback, LaneResult 생성입니다.
         """
 
         height, width = frame.shape[:2]
         color_mask, road_mask = self._candidate_masks(frame)
         edge_mask = self._edge_mask(frame, color_mask)
         roi_mask, roi_points = self._limit_region(edge_mask)
-        lines = self._hough_lines(roi_mask)
-        left_line, right_line, left_count, right_count = self._fit_lanes(lines, width)
+        lane_roi_mask, _ = self._limit_region(color_mask)
+        left_line, right_line, left_count, right_count = self._fit_lanes_from_bands(
+            lane_roi_mask,
+            width,
+            height,
+        )
+        if left_line is None and right_line is None:
+            lines = self._hough_lines(roi_mask)
+            left_line, right_line, left_count, right_count = self._fit_lanes(
+                lines,
+                width,
+            )
 
         lane = self._make_lane_result(
             frame,
@@ -329,7 +353,7 @@ class OpenCVLaneDetector:
 
         기울기가 음수이고 화면 왼쪽에 있으면 왼쪽 차선입니다.
         기울기가 양수이고 화면 오른쪽에 있으면 오른쪽 차선입니다.
-        반환하는 line은 x = slope * y + intercept 형태입니다.
+        반환하는 line은 numpy.polyval(line, y)로 x를 계산하는 계수입니다.
         """
 
         left_points = []
@@ -353,21 +377,213 @@ class OpenCVLaneDetector:
                 right_points.extend([(x1, y1), (x2, y2)])
 
         return (
-            self._fit_line(left_points),
-            self._fit_line(right_points),
+            self._fit_curve(left_points, force_linear=True),
+            self._fit_curve(right_points, force_linear=True),
             len(left_points) // 2,
             len(right_points) // 2,
         )
 
-    def _fit_line(self, points):
-        """여러 점을 x = slope * y + intercept 직선 하나로 근사합니다."""
+    def _fit_lanes_from_bands(self, lane_mask, image_width: int, image_height: int):
+        """가로 밴드별 흰 선 중심을 모아 좌/우 차선 곡선을 피팅합니다.
 
-        if len(points) < 4:
+        커브 트랙에서는 한 프레임 안에서도
+        차선 x 위치가 y에 따라 크게 변합니다.
+        따라서 화면 아래쪽부터 여러 줄을 잘라 흰색 덩어리의 중심을 찾고,
+        예상 차선 폭과 최근 기억한 폭에 가까운
+        좌/우 쌍을 우선 선택합니다.
+        """
+
+        band_count = max(3, int(self._p("curve_band_count")))
+        band_height = max(8, int(self._p("curve_band_height")))
+        min_pixels = max(2, int(self._p("curve_min_band_pixels")))
+        max_segment_width = max(
+            6,
+            int(image_width * float(self._p("curve_max_segment_width_ratio"))),
+        )
+        min_points = max(2, int(self._p("curve_min_points")))
+        expected_width = image_width * self._remembered_width_ratio()
+        width_tolerance = float(self._p("curve_pair_width_tolerance"))
+        center_weight = float(self._p("curve_pair_center_weight"))
+
+        left_points = []
+        right_points = []
+        image_center = image_width / 2.0
+        previous_center = image_center
+        top_y = int(image_height * float(self._p("roi_top_ratio")))
+        bottom_y = image_height - 1
+
+        for index in range(band_count):
+            y_end = bottom_y - index * band_height
+            y_start = max(top_y, y_end - band_height + 1)
+            if y_end <= top_y or y_start >= y_end:
+                continue
+
+            band = lane_mask[y_start : y_end + 1, :]
+            segments = self._lane_segments_from_band(
+                band,
+                min_pixels,
+                max_segment_width,
+                y_start,
+            )
+            if not segments:
+                continue
+
+            y_center = (y_start + y_end) / 2.0
+            pair = self._choose_lane_pair(
+                segments,
+                expected_width,
+                previous_center,
+                image_center,
+                width_tolerance,
+                center_weight,
+            )
+            if pair is not None:
+                left_segment, right_segment = pair
+                left_points.append((left_segment[0], y_center))
+                right_points.append((right_segment[0], y_center))
+                previous_center = (left_segment[0] + right_segment[0]) / 2.0
+                continue
+
+            left_segment = self._choose_single_segment(segments, "left", image_width)
+            right_segment = self._choose_single_segment(segments, "right", image_width)
+            if left_segment is not None:
+                left_points.append((left_segment[0], y_center))
+            if right_segment is not None:
+                right_points.append((right_segment[0], y_center))
+
+        left_line = self._fit_curve(left_points) if len(left_points) >= min_points else None
+        right_line = self._fit_curve(right_points) if len(right_points) >= min_points else None
+        return left_line, right_line, len(left_points), len(right_points)
+
+    def _lane_segments_from_band(self, band, min_pixels: int, max_width: int, y_start: int):
+        """한 가로 밴드에서 흰 선 덩어리들의 x 중심을 찾습니다.
+
+        반환 요소는 (center_x, segment_width, pixel_sum, y_start)입니다.
+        y_start는 로그/디버깅 확장을 고려해 함께 보관합니다.
+        """
+
+        histogram = np.sum(band > 0, axis=0).astype(np.float32)
+        smooth_width = max(3, int(self._p("curve_hist_smooth_width")))
+        if smooth_width % 2 == 0:
+            smooth_width += 1
+        kernel = np.ones(smooth_width, dtype=np.float32) / float(smooth_width)
+        histogram = np.convolve(histogram, kernel, mode="same")
+        active = histogram >= float(min_pixels)
+
+        segments = []
+        start = None
+        for index, is_active in enumerate(active):
+            if is_active and start is None:
+                start = index
+            elif not is_active and start is not None:
+                self._append_lane_segment(
+                    segments,
+                    histogram,
+                    start,
+                    index - 1,
+                    max_width,
+                    y_start,
+                )
+                start = None
+        if start is not None:
+            self._append_lane_segment(
+                segments,
+                histogram,
+                start,
+                len(active) - 1,
+                max_width,
+                y_start,
+            )
+        return segments
+
+    def _append_lane_segment(self, segments, histogram, start, end, max_width, y_start):
+        """밴드 안의 연속 흰 픽셀 구간을 차선 후보로 추가합니다."""
+
+        width = end - start + 1
+        if width <= 1 or width > max_width:
+            return
+        xs = np.arange(start, end + 1, dtype=np.float32)
+        weights = histogram[start : end + 1]
+        weight_sum = float(np.sum(weights))
+        if weight_sum <= 0.0:
+            center = (start + end) / 2.0
+        else:
+            center = float(np.average(xs, weights=weights))
+        segments.append((center, width, weight_sum, y_start))
+
+    def _choose_lane_pair(
+        self,
+        segments,
+        expected_width: float,
+        previous_center: float,
+        image_center: float,
+        width_tolerance: float,
+        center_weight: float,
+    ):
+        """현재 차로 폭/중심에 가장 가까운 좌우 쌍을 고릅니다."""
+
+        best_pair = None
+        best_score = float("inf")
+        min_width = expected_width * max(0.10, 1.0 - width_tolerance)
+        max_width = expected_width * (1.0 + width_tolerance)
+
+        for left in segments:
+            for right in segments:
+                lane_width = right[0] - left[0]
+                if lane_width <= 0.0:
+                    continue
+                if lane_width < min_width or lane_width > max_width:
+                    continue
+                pair_center = (left[0] + right[0]) / 2.0
+                width_score = abs(lane_width - expected_width) / max(expected_width, 1.0)
+                center_score = abs(pair_center - previous_center) / max(image_center, 1.0)
+                screen_score = abs(pair_center - image_center) / max(image_center, 1.0)
+                score = width_score + center_weight * center_score + 0.25 * screen_score
+                if score < best_score:
+                    best_score = score
+                    best_pair = (left, right)
+        return best_pair
+
+    def _choose_single_segment(self, segments, side: str, image_width: int):
+        """한쪽 차선만 보일 때 기억한 거리와 가까운 후보를 고릅니다."""
+
+        target_x = self._target_lane_x(side, image_width)
+        image_center = image_width / 2.0
+        if side == "left":
+            candidates = [segment for segment in segments if segment[0] < image_center]
+        else:
+            candidates = [segment for segment in segments if segment[0] > image_center]
+        if not candidates:
+            return None
+        return min(candidates, key=lambda segment: abs(segment[0] - target_x))
+
+    def _target_lane_x(self, side: str, image_width: int) -> float:
+        """저장된 offset 기준으로 좌/우 차선 예상 x를 계산합니다."""
+
+        image_center = image_width / 2.0
+        expected_width_ratio = self._remembered_width_ratio()
+        if side == "left":
+            offset = self._remembered_offset_ratio(
+                self.tracked_left_offset_ratio,
+                expected_width_ratio / 2.0,
+            )
+            return image_center - offset * image_width
+        offset = self._remembered_offset_ratio(
+            self.tracked_right_offset_ratio,
+            expected_width_ratio / 2.0,
+        )
+        return image_center + offset * image_width
+
+    def _fit_curve(self, points, force_linear: bool = False):
+        """여러 점을 y 기준 x=f(y) 곡선 계수로 근사합니다."""
+
+        if len(points) < 2:
             return None
         xs = np.array([point[0] for point in points], dtype=np.float32)
         ys = np.array([point[1] for point in points], dtype=np.float32)
-        slope, intercept = np.polyfit(ys, xs, 1)
-        return float(slope), float(intercept)
+        degree = 1 if force_linear or len(points) < 3 else 2
+        coefficients = np.polyfit(ys, xs, degree)
+        return tuple(float(value) for value in coefficients)
 
     def _make_lane_result(
         self,
@@ -390,9 +606,9 @@ class OpenCVLaneDetector:
 
         height, width = frame.shape[:2]
         image_center = width / 2.0
-        lookahead_y = height * float(self._p("lookahead_ratio"))
-        left_x = self._line_x_at(left_line, lookahead_y)
-        right_x = self._line_x_at(right_line, lookahead_y)
+        control_y = height * float(self._p("lane_control_y_ratio"))
+        left_x = self._line_x_at(left_line, control_y)
+        right_x = self._line_x_at(right_line, control_y)
 
         mask_ratio = float(cv2.countNonZero(lane_mask)) / float(lane_mask.size)
         road_ratio = float(cv2.countNonZero(road_mask)) / float(road_mask.size)
@@ -484,12 +700,11 @@ class OpenCVLaneDetector:
         )
 
     def _line_x_at(self, line, y: float) -> Optional[float]:
-        """피팅된 직선이 특정 y 위치에서 갖는 x 좌표를 계산합니다."""
+        """피팅된 직선/곡선이 특정 y 위치에서 갖는 x 좌표를 계산합니다."""
 
         if line is None:
             return None
-        slope, intercept = line
-        x = slope * y + intercept
+        x = float(np.polyval(np.array(line, dtype=np.float32), y))
         if not math.isfinite(x):
             return None
         return float(x)
@@ -695,18 +910,23 @@ class OpenCVLaneDetector:
         return debug
 
     def _draw_fit_line(self, image, line, color):
-        """피팅된 차선 직선을 디버그 이미지에 그립니다."""
+        """피팅된 차선 직선/곡선을 디버그 이미지에 그립니다."""
 
         if line is None:
             return
-        height = image.shape[0]
+        height, width = image.shape[:2]
         y1 = height - 1
         y2 = int(height * float(self._p("roi_top_ratio")))
-        x1 = self._line_x_at(line, y1)
-        x2 = self._line_x_at(line, y2)
-        if x1 is None or x2 is None:
+        points = []
+        for y in np.linspace(y2, y1, 24):
+            x = self._line_x_at(line, float(y))
+            if x is None:
+                continue
+            x = int(np.clip(x, 0, width - 1))
+            points.append((x, int(y)))
+        if len(points) < 2:
             return
-        cv2.line(image, (int(x1), y1), (int(x2), y2), color, 4)
+        cv2.polylines(image, [np.array(points, dtype=np.int32)], False, color, 4)
 
     def _log_lane_status(self, lane: LaneResult, width: int, height: int):
         """publish_lane_log가 켜졌을 때 차선 상세 수치를 로그로 출력합니다."""

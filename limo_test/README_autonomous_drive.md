@@ -100,11 +100,11 @@ ros2 run limo_test autonomous_drive --ros-args --params-file ~/wego_ws/src/limo_
 2. Gray 변환, adaptive threshold, 상대 밝기 threshold, Gaussian blur, Canny edge,
    Sobel-x 마스크를 적용해 어두운 차선과 빛 반사 구간을 보강합니다.
 3. 차량 앞 바닥만 남기도록 사다리꼴 ROI를 적용합니다.
-4. `cv2.HoughLinesP()`로 선분을 검출하고, 기울기와 화면 위치로 좌/우 차선을
-   분리합니다.
-5. 좌/우 선분 점들을 `numpy.polyfit()`으로 직선 피팅한 뒤 `lookahead_ratio`
-   위치의 차선 중심을 구합니다. 한쪽 차선만 보이면 `expected_lane_width_ratio`
-   값으로 반대 차선을 가정합니다.
+4. 흰 선 마스크를 화면 아래쪽부터 여러 가로 밴드로 자르고, 각 밴드에서
+   차선 덩어리 중심을 찾습니다. 실제 트랙처럼 굵고 휘어진 흰 선은 이 밴드
+   점들을 `numpy.polyfit()`으로 2차 곡선 피팅해 따라갑니다.
+5. 밴드 피팅이 실패하면 `cv2.HoughLinesP()` 선분 검출을 fallback으로 사용합니다.
+   한쪽 차선만 보이면 `expected_lane_width_ratio` 값으로 반대 차선을 가정합니다.
    최근 양쪽 차선이 정상적으로 보였던 차선 폭과 차선-중심 오프셋을 기억해,
    햇빛 반사로 한쪽 흰 선만 보이는 순간에도 그 선과 차량 사이 거리를 유지합니다.
 6. `autonomous_drive.py`가 중심 오차를 PID 제어로 조향값에 반영합니다.
@@ -157,6 +157,11 @@ ros2 run limo_test autonomous_drive --ros-args --params-file ~/wego_ws/src/limo_
    다른 차선을 잡았다가 돌아오면 `lane_switch_reject_error`를 낮춥니다.
    한쪽 차선만 보일 때 중앙 정렬이 늦으면 `single_lane_memory_trust`를 올리고,
    너무 과하게 꺾이면 낮춥니다.
+   선과 차량 간 offset 유지가 약하면 `lane_control_y_ratio`를 0.82 쪽으로
+   올려 더 가까운 하단 차선 기준으로 제어합니다.
+   커브에서 직선처럼 잘못 그려지면 `curve_band_count`, `curve_band_height`,
+   `curve_pair_width_tolerance`를 조정합니다. 흰 선이 굵게 끊겨 보이면
+   `curve_min_band_pixels`를 낮추고, 햇빛 반사가 차선처럼 잡히면 올립니다.
 4. 장애물 회피가 늦으면 `slow_distance`, `stop_distance`를 키웁니다.
 5. 터널에서 벽 때문에 튀면 `tunnel_side_distance`와 `tunnel_balance_tolerance`를
    코스 폭에 맞춥니다.
@@ -165,7 +170,7 @@ ros2 run limo_test autonomous_drive --ros-args --params-file ~/wego_ws/src/limo_
 7. 책상 다리 같은 얇은 장애물을 놓치면 `side_obstacle_distance`를 키우거나
    `closest_sample_count`를 `1`로 유지합니다.
 8. AEB가 너무 민감하면 `aeb_core_sector_deg`를 줄이고, 너무 늦으면
-   `aeb_distance`를 키웁니다. 현재 기본값은 정면 core 20cm입니다.
+   `aeb_distance`를 키웁니다. 현재 기본값은 정면 core 30cm입니다.
    터널에서 멈추면 `passable_side_clearance`를 조금 낮추고, 코너 옆면을 치면
    `corner_side_guard_distance`를 올립니다.
    AEB 후진 복구가 과하면 `enable_aeb_recovery: false`로 끄거나
