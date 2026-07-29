@@ -67,6 +67,12 @@ class OpenCVLaneDetector:
         self.node.declare_parameter("yellow_v_min", 80)
         self.node.declare_parameter("hls_l_min", 115)
         self.node.declare_parameter("hls_s_min", 55)
+        self.node.declare_parameter("enable_clahe", True)
+        self.node.declare_parameter("adaptive_block_size", 31)
+        self.node.declare_parameter("adaptive_c", -8)
+        self.node.declare_parameter("relative_white_margin", 18)
+        self.node.declare_parameter("reflection_value_min", 220)
+        self.node.declare_parameter("reflection_saturation_max", 45)
 
         # Edge/Hough 파라미터. OpenCV 4.12.0의 Python API와 호환됩니다.
         self.node.declare_parameter("gaussian_kernel_size", 5)
@@ -84,6 +90,8 @@ class OpenCVLaneDetector:
         self.node.declare_parameter("top_lane_width_ratio", 0.22)
         self.node.declare_parameter("bottom_lane_width_ratio", 0.62)
         self.node.declare_parameter("single_lane_offset_ratio", 0.24)
+        self.node.declare_parameter("single_lane_trust", 0.55)
+        self.node.declare_parameter("single_lane_confidence", 0.30)
         self.node.declare_parameter("min_lane_confidence", 0.25)
         self.node.declare_parameter("min_lane_area", 80)
         self.node.declare_parameter("max_lane_area_ratio", 0.18)
@@ -127,8 +135,10 @@ class OpenCVLaneDetector:
         return lane, debug
 
     def _candidate_masks(self, frame):
-        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-        hls = cv2.cvtColor(frame, cv2.COLOR_BGR2HLS)
+        corrected = self._illumination_corrected(frame)
+        hsv = cv2.cvtColor(corrected, cv2.COLOR_BGR2HSV)
+        hls = cv2.cvtColor(corrected, cv2.COLOR_BGR2HLS)
+        gray = cv2.cvtColor(corrected, cv2.COLOR_BGR2GRAY)
 
         white_mask = cv2.inRange(
             hsv,
@@ -155,8 +165,36 @@ class OpenCVLaneDetector:
             | (hls_s >= int(self._p("hls_s_min")))
         ] = 255
 
+        block_size = int(self._p("adaptive_block_size"))
+        if block_size % 2 == 0:
+            block_size += 1
+        block_size = max(block_size, 3)
+        adaptive = cv2.adaptiveThreshold(
+            gray,
+            255,
+            cv2.ADAPTIVE_THRESH_MEAN_C,
+            cv2.THRESH_BINARY,
+            block_size,
+            int(self._p("adaptive_c")),
+        )
+        relative_threshold = int(
+            np.clip(
+                np.mean(gray) + float(self._p("relative_white_margin")),
+                60,
+                245,
+            )
+        )
+        relative = cv2.inRange(gray, relative_threshold, 255)
+        reflection = cv2.inRange(
+            hsv,
+            np.array([0, 0, int(self._p("reflection_value_min"))]),
+            np.array([180, int(self._p("reflection_saturation_max")), 255]),
+        )
+
         lane_mask = cv2.bitwise_or(white_mask, yellow_mask)
-        lane_mask = cv2.bitwise_and(cv2.bitwise_or(lane_mask, hls_mask), lane_mask)
+        lane_mask = cv2.bitwise_or(lane_mask, cv2.bitwise_and(adaptive, hls_mask))
+        lane_mask = cv2.bitwise_or(lane_mask, cv2.bitwise_and(relative, hls_mask))
+        lane_mask = cv2.bitwise_and(lane_mask, cv2.bitwise_not(reflection))
 
         kernel = np.ones((3, 3), np.uint8)
         lane_mask = cv2.morphologyEx(lane_mask, cv2.MORPH_OPEN, kernel)
@@ -168,6 +206,17 @@ class OpenCVLaneDetector:
             np.array([180, 255, int(self._p("black_road_value_max"))]),
         )
         return lane_mask, road_mask
+
+    def _illumination_corrected(self, frame):
+        if not bool(self._p("enable_clahe")):
+            return frame
+
+        lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
+        lightness, a_channel, b_channel = cv2.split(lab)
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        lightness = clahe.apply(lightness)
+        corrected = cv2.merge((lightness, a_channel, b_channel))
+        return cv2.cvtColor(corrected, cv2.COLOR_LAB2BGR)
 
     def _edge_mask(self, frame, lane_mask):
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
@@ -326,15 +375,17 @@ class OpenCVLaneDetector:
         elif left_x is not None:
             expected_width = width * float(self._p("expected_lane_width_ratio"))
             lane_center = left_x + expected_width / 2.0
+            lane_center = self._single_lane_center(image_center, lane_center)
             lane_width_ratio = expected_width / float(width)
             geometry_valid = mask_ratio <= float(self._p("max_lane_mask_ratio"))
-            confidence = 0.38 if geometry_valid else 0.0
+            confidence = float(self._p("single_lane_confidence")) if geometry_valid else 0.0
         elif right_x is not None:
             expected_width = width * float(self._p("expected_lane_width_ratio"))
             lane_center = right_x - expected_width / 2.0
+            lane_center = self._single_lane_center(image_center, lane_center)
             lane_width_ratio = expected_width / float(width)
             geometry_valid = mask_ratio <= float(self._p("max_lane_mask_ratio"))
-            confidence = 0.38 if geometry_valid else 0.0
+            confidence = float(self._p("single_lane_confidence")) if geometry_valid else 0.0
 
         if not camera_valid or not road_valid:
             confidence = 0.0
@@ -368,6 +419,13 @@ class OpenCVLaneDetector:
         if not math.isfinite(x):
             return None
         return float(x)
+
+    def _single_lane_center(self, image_center: float, estimated_center: float) -> float:
+        # 한쪽 차선만 보이는 코너에서는 예상 차선 폭 오차가 커져
+        # 차량이 한쪽 라인을 물듯이 붙을 수 있습니다.
+        # 추정 중심을 화면 중심과 섞어 과한 한쪽 쏠림을 줄입니다.
+        trust = float(np.clip(float(self._p("single_lane_trust")), 0.0, 1.0))
+        return image_center + trust * (estimated_center - image_center)
 
     def _large_component_count(self, mask) -> int:
         min_area = int(self._p("min_lane_area"))

@@ -35,8 +35,11 @@ class LidarObstacleAvoidance:
         self.node.declare_parameter("lane_lost_lidar_angle_deg", 95.0)
         self.node.declare_parameter("lane_lost_clearance_distance", 1.20)
         self.node.declare_parameter("lane_lost_open_distance", 2.50)
-        self.node.declare_parameter("lane_lost_gap_gain", 0.85)
-        self.node.declare_parameter("lane_lost_obstacle_gain", 0.75)
+        self.node.declare_parameter("lane_lost_gap_gain", 0.95)
+        self.node.declare_parameter("lane_lost_obstacle_gain", 0.95)
+        self.node.declare_parameter("lane_lost_wall_gain", 0.50)
+        self.node.declare_parameter("wall_follow_target_distance", 0.45)
+        self.node.declare_parameter("wall_follow_max_distance", 1.20)
         self.node.declare_parameter("lane_lost_speed", 0.50)
         self.node.declare_parameter("lane_lost_min_speed", 0.50)
 
@@ -59,7 +62,7 @@ class LidarObstacleAvoidance:
         self.node.declare_parameter("tunnel_side_distance", 0.70)
         self.node.declare_parameter("tunnel_balance_tolerance", 0.28)
         self.node.declare_parameter("tunnel_centering_gain", 0.35)
-        self.node.declare_parameter("avoid_gain", 0.85)
+        self.node.declare_parameter("avoid_gain", 1.05)
 
         # AEB 후 복구 시퀀스: 짧게 후진하고 열린 쪽으로 선회합니다.
         self.node.declare_parameter("enable_aeb_recovery", True)
@@ -157,6 +160,7 @@ class LidarObstacleAvoidance:
         open_distance = float(self._p("lane_lost_open_distance"))
         gap_gain = float(self._p("lane_lost_gap_gain"))
         obstacle_gain = float(self._p("lane_lost_obstacle_gain"))
+        wall_gain = float(self._p("lane_lost_wall_gain"))
         base_speed = float(self._p("lane_lost_speed"))
         min_speed = float(self._p("lane_lost_min_speed"))
 
@@ -164,6 +168,7 @@ class LidarObstacleAvoidance:
         best_angle = 0.0
         repulsion = 0.0
         valid_count = 0
+        close_count = 0
 
         for i, value in enumerate(scan.ranges):
             if not self._valid_range(scan, value):
@@ -181,6 +186,7 @@ class LidarObstacleAvoidance:
                 best_angle = angle
 
             if value < clearance_distance:
+                close_count += 1
                 side = 1.0 if angle >= 0.0 else -1.0
                 repulsion -= side * (clearance_distance - value) / clearance_distance
 
@@ -189,9 +195,57 @@ class LidarObstacleAvoidance:
 
         gap_steering = gap_gain * (best_angle / max(search_angle, 1e-3))
         obstacle_steering = obstacle_gain * np.clip(repulsion, -1.0, 1.0)
-        steering = float(np.clip(gap_steering + obstacle_steering, -1.0, 1.0))
+        wall_steering = wall_gain * self.wall_follow_error(scan)
+        steering = float(
+            np.clip(gap_steering + obstacle_steering + wall_steering, -1.0, 1.0)
+        )
         speed = max(min_speed, base_speed * (1.0 - min(abs(steering), 0.65)))
+        mode = "gap_wall" if close_count > 0 else "open_wall"
+        self.node.get_logger().info(
+            "lane_lost_lidar "
+            f"mode={mode} best_angle={math.degrees(best_angle):+.1f}deg "
+            f"gap={gap_steering:+.2f} obs={obstacle_steering:+.2f} "
+            f"wall={wall_steering:+.2f} steer={steering:+.2f} "
+            f"speed={speed:.2f}",
+            throttle_duration_sec=0.5,
+        )
         return speed, steering
+
+    def wall_follow_error(self, scan: LaserScan) -> float:
+        target = float(self._p("wall_follow_target_distance"))
+        max_distance = float(self._p("wall_follow_max_distance"))
+        left = self.side_average(scan, 55.0, 105.0, max_distance)
+        right = self.side_average(scan, -105.0, -55.0, max_distance)
+
+        if not math.isfinite(left) and not math.isfinite(right):
+            return 0.0
+        if math.isfinite(left) and math.isfinite(right):
+            return float(np.clip((right - left) / max(target, 1e-3), -1.0, 1.0))
+        if math.isfinite(left):
+            return float(np.clip((target - left) / max(target, 1e-3), -1.0, 1.0))
+        return float(np.clip((right - target) / max(target, 1e-3), -1.0, 1.0))
+
+    def side_average(
+        self,
+        scan: LaserScan,
+        start_deg: float,
+        end_deg: float,
+        max_distance: float,
+    ) -> float:
+        start = math.radians(start_deg)
+        end = math.radians(end_deg)
+        values = []
+        for i, value in enumerate(scan.ranges):
+            if not self._valid_range(scan, value):
+                continue
+            if value > max_distance:
+                continue
+            angle = scan.angle_min + i * scan.angle_increment
+            if start <= angle <= end:
+                values.append(value)
+        if not values:
+            return float("inf")
+        return float(np.median(values))
 
     def obstacle_command(self, scan: LaserScan) -> Tuple[float, float, str]:
         """라이다 장애물 상태를 속도/조향/모드로 변환합니다."""
@@ -292,7 +346,7 @@ class LidarObstacleAvoidance:
             )
             return corner_speed, avoid_gain * clearance_delta, "corner_guard"
 
-        if bool(self._p("enable_lidar_slalom")):
+        if front < slow_distance and bool(self._p("enable_lidar_slalom")):
             slalom = self.slalom_gap_command(scan)
             if slalom is not None:
                 self.log_decision(

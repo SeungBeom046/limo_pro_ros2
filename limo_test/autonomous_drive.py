@@ -93,6 +93,8 @@ class LimoAutonomousDrive(Node):
         self.last_lane_seen_time = None
         self.integral = 0.0
         self.prev_time = self.get_clock().now()
+        self.last_cmd_speed = 0.0
+        self.last_cmd_steering = 0.0
 
         self.get_logger().info(
             "LIMO autonomous drive ready: "
@@ -128,7 +130,7 @@ class LimoAutonomousDrive(Node):
         self.declare_parameter("steering_smoothing", 0.22)
 
         # 차선 중심 오차를 조향으로 바꾸는 PID입니다.
-        self.declare_parameter("kp", 1.70)
+        self.declare_parameter("kp", 2.05)
         self.declare_parameter("ki", 0.0)
         self.declare_parameter("kd", 0.22)
         self.declare_parameter("integral_limit", 0.45)
@@ -144,6 +146,8 @@ class LimoAutonomousDrive(Node):
         self.declare_parameter("enable_lane_lost_drive", True)
         self.declare_parameter("lane_lost_steering_decay", 0.45)
         self.declare_parameter("lane_lost_use_lidar", True)
+        self.declare_parameter("allow_lidar_drive_when_camera_invalid", True)
+        self.declare_parameter("allow_lidar_drive_without_camera", True)
 
         # 센서가 오래되면 잘못된 명령을 내지 않도록 제한합니다.
         self.declare_parameter("image_timeout_sec", 0.7)
@@ -199,6 +203,23 @@ class LimoAutonomousDrive(Node):
         scan_ok = self.is_recent(self.last_scan_time, "scan_timeout_sec")
 
         if not image_ok:
+            if (
+                bool(self.get_parameter("allow_lidar_drive_without_camera").value)
+                and scan_ok
+                and self.latest_scan is not None
+            ):
+                speed, steering = self.lidar.lane_lost_command(self.latest_scan)
+                speed, steering, drive_state = self.apply_lidar_avoidance(
+                    speed,
+                    steering,
+                    False,
+                    True,
+                    "no_camera_lidar",
+                    now,
+                )
+                self.publish_command(speed, steering)
+                self.log_drive_status(None, False, drive_state, scan_ok)
+                return
             self.publish_stop("Waiting for camera image")
             return
 
@@ -249,7 +270,11 @@ class LimoAutonomousDrive(Node):
             if drive_state == "lane_follow":
                 drive_state = "camera_low_obstacle"
 
-        if lane_lost_active and scan_ok and drive_state not in ("aeb_stop", "camera_invalid"):
+        if (
+            lane_lost_active
+            and scan_ok
+            and drive_state not in ("aeb_stop", "camera_invalid")
+        ):
             speed = float(self.get_parameter("lane_lost_min_speed").value)
 
         self.publish_command(speed, steering)
@@ -279,6 +304,20 @@ class LimoAutonomousDrive(Node):
 
         if lane is not None and not lane.camera_valid:
             self.integral = 0.0
+            if (
+                bool(self.get_parameter("allow_lidar_drive_when_camera_invalid").value)
+                and scan_ok
+                and self.latest_scan is not None
+            ):
+                # 카메라 화면이 과노출/암전 등으로 차선 판단 불가여도
+                # 라이다가 살아 있으면 정지 고착 대신
+                # 열린 방향으로 저속 탐색합니다.
+                speed, steering = self.lidar.lane_lost_command(self.latest_scan)
+                self.get_logger().warn(
+                    "Camera invalid. Using lidar fallback.",
+                    throttle_duration_sec=1.0,
+                )
+                return speed, steering, False, True, "camera_invalid_lidar"
             return 0.0, 0.0, False, False, "camera_invalid"
 
         if bool(self.get_parameter("enable_lane_lost_drive").value):
@@ -447,6 +486,8 @@ class LimoAutonomousDrive(Node):
         max_angular = float(self.get_parameter("max_angular").value)
         msg.linear.x = float(speed)
         msg.angular.z = float(np.clip(steering, -max_angular, max_angular))
+        self.last_cmd_speed = msg.linear.x
+        self.last_cmd_steering = msg.angular.z
         self.cmd_pub.publish(msg)
 
     def publish_debug_image(self):
@@ -529,14 +570,38 @@ class LimoAutonomousDrive(Node):
 
         lane_text = "인식" if lane_valid else "미인식"
         aeb_text = "작동" if drive_state.startswith("aeb") else "미작동"
-        scan_text = "정상" if scan_ok else "끊김"
-        lidar_text = self.lidar.last_decision_log if scan_ok else "lidar unavailable"
+        lane_status = self.format_lane_status(lane, lane_valid, drive_state)
         self.get_logger().info(
-            f"차선: {lane_text} | 라이다: {scan_text} | "
-            f"AEB: {aeb_text} | 상태: {drive_state} | {lidar_text}",
+            f"\n차선: {lane_text} | AEB: {aeb_text} | "
+            f"속도: {self.last_cmd_speed:.2f} m/s\n"
+            f"차선 상태: {lane_status}",
             throttle_duration_sec=float(
                 self.get_parameter("drive_log_period_sec").value
             ),
+        )
+
+    def format_lane_status(
+        self,
+        lane: Optional[LaneResult],
+        lane_valid: bool,
+        drive_state: str,
+    ) -> str:
+        if lane is None:
+            return f"카메라 프레임 없음, 현재 주행 상태는 {drive_state}"
+
+        left_text = "보임" if lane.left_x is not None else "안 보임"
+        right_text = "보임" if lane.right_x is not None else "안 보임"
+        validity = "주행 기준 충족" if lane_valid else "신뢰도 부족"
+        camera_text = "정상" if lane.camera_valid else "판단 불가"
+        road_text = "확인" if lane.road_valid else "부족"
+        obstacle_text = "감지" if lane.camera_obstacle else "없음"
+
+        return (
+            f"왼쪽 차선 {left_text}, 오른쪽 차선 {right_text}, "
+            f"신뢰도 {lane.confidence:.2f}({validity}), "
+            f"중심 오차 {lane.center_error:+.2f}, "
+            f"카메라 {camera_text}, 도로영역 {road_text}, "
+            f"하단 장애물 {obstacle_text}, 상태 {drive_state}"
         )
 
 

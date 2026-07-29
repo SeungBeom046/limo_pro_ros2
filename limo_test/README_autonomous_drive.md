@@ -95,10 +95,10 @@ ros2 run limo_test autonomous_drive --ros-args --params-file ~/wego_ws/src/limo_
 
 ## 알고리즘
 
-1. `camera_lane_detector.py`가 BGR/HSV/HLS 색공간에서 흰색/노란색 차선 후보를
-   추출합니다.
-2. Gray 변환, Gaussian blur, Canny edge, Sobel-x 마스크를 적용해 차선 edge를
-   보강합니다.
+1. `camera_lane_detector.py`가 CLAHE로 밝기를 보정한 뒤 BGR/HSV/HLS 색공간에서
+   흰색/노란색 차선 후보를 추출합니다.
+2. Gray 변환, adaptive threshold, 상대 밝기 threshold, Gaussian blur, Canny edge,
+   Sobel-x 마스크를 적용해 어두운 차선과 빛 반사 구간을 보강합니다.
 3. 차량 앞 바닥만 남기도록 사다리꼴 ROI를 적용합니다.
 4. `cv2.HoughLinesP()`로 선분을 검출하고, 기울기와 화면 위치로 좌/우 차선을
    분리합니다.
@@ -127,11 +127,14 @@ ros2 run limo_test autonomous_drive --ros-args --params-file ~/wego_ws/src/limo_
    감지합니다.
 15. 고깔처럼 라이다가 위쪽만 보고 하부를 늦게 잡을 수 있는 물체는 카메라 하단
    중앙의 `camera_low_obstacle` 판단으로 미리 감속하고 약하게 피합니다.
-16. 차선이 안 보이면 `lane_lost_lidar` fallback으로 전환해 라이다 기준 열린
-   방향을 찾고, 가까운 물체 반대쪽으로 조향합니다.
-17. 검은 트랙 화면은 정상 도로로 취급합니다. 화면이 거의 흰색이고 검은 도로가
+16. 차선이 안 보이면 `lane_lost_lidar` fallback으로 전환합니다. 이때 열린 gap,
+   가까운 장애물 반발, wall follow를 섞어 기본 주행을 계속합니다.
+17. 카메라 화면이 과노출/암전 등으로 차선 판단 불가여도
+   `allow_lidar_drive_when_camera_invalid`가 true이면 `camera_invalid_lidar`로
+   라이다 기준 저속 탐색을 합니다.
+18. 검은 트랙 화면은 정상 도로로 취급합니다. 화면이 거의 흰색이고 검은 도로가
    거의 없을 때만 카메라 이상으로 판단합니다.
-18. 카메라 또는 라이다 데이터가 끊기면 속도를 낮추거나 정지합니다.
+19. 카메라 또는 라이다 데이터가 끊기면 속도를 낮추거나 정지합니다.
 
 ## 튜닝 순서
 
@@ -139,11 +142,14 @@ ros2 run limo_test autonomous_drive --ros-args --params-file ~/wego_ws/src/limo_
 2. `debug_image_topic`을 보면서 `roi_top_ratio`, `roi_top_width_ratio`,
    `roi_bottom_width_ratio`를 맞춥니다.
    트랙 위에서 차선이 계속 미인식이면 먼저 `black_road_value_max`를 130~150까지
-   올리고, 흰 선이 끊겨 보이면 `white_lane_value_min`을 조금 낮춥니다.
+   올리고, 흰 선이 끊겨 보이면 `white_lane_value_min`, `hls_l_min`을 조금
+   낮춥니다. 햇빛 반사 오인이 많으면 `reflection_value_min`을 낮추거나
+   `reflection_saturation_max`를 올립니다.
    노란 차선을 놓치면 `yellow_s_min`, `yellow_v_min`을 낮춥니다.
 3. 차선 중심이 흔들리면 `kd`를 조금 올리고, 반응이 너무 강하면 `kp`를 낮춥니다.
    트래킹 중 갑자기 직진하면 `lane_hold_time_sec`를 조금 올리고,
    잘못된 선을 오래 따라가면 `lane_hold_time_sec`를 낮춥니다.
+   코너에서 한쪽 라인에 붙으면 `single_lane_trust`를 낮춥니다.
 4. 장애물 회피가 늦으면 `slow_distance`, `stop_distance`를 키웁니다.
 5. 터널에서 벽 때문에 튀면 `tunnel_side_distance`와 `tunnel_balance_tolerance`를
    코스 폭에 맞춥니다.
@@ -159,8 +165,8 @@ ros2 run limo_test autonomous_drive --ros-args --params-file ~/wego_ws/src/limo_
    `aeb_recovery_reverse_speed`, `aeb_recovery_reverse_sec`를 낮춥니다.
 9. 차선이 없는 바닥에서는 기본 `lane_lost_speed: 0.50`으로 라이다 fallback
    주행을 합니다. 너무 빠르면 `lane_lost_speed`를 낮춥니다. 라이다
-   fallback이 너무 크게 꺾으면 `lane_lost_gap_gain`, `lane_lost_obstacle_gain`을
-   낮춥니다.
+   fallback이 너무 크게 꺾으면 `lane_lost_gap_gain`, `lane_lost_obstacle_gain`,
+   `lane_lost_wall_gain`을 낮춥니다.
 10. 차선 인식 직진 구간은 `straight_min_speed: 1.40`까지 주행합니다.
    불안하면 `straight_min_speed`, `max_speed`를 낮춘 뒤 점진적으로 올립니다.
    코너에서 너무 느리면 `lane_follow_min_speed`를 올리고, 흔들리면
@@ -173,12 +179,15 @@ ros2 run limo_test autonomous_drive --ros-args --params-file ~/wego_ws/src/limo_
 
 ## 차선 로그 확인
 
-기본 주행 로그는 한 줄에 핵심 상태를 출력합니다.
+기본 주행 로그는 첫 줄에 핵심 상태, 다음 줄에 차선 상태를 출력합니다.
 
 ```text
-차선: 인식 | 라이다: 정상 | AEB: 미작동 | 상태: lane_follow
-차선: 미인식 | 라이다: 정상 | AEB: 미작동 | 상태: lane_lost_lidar
-차선: 미인식 | 라이다: 정상 | AEB: 작동 | 상태: aeb_stop
+차선: 인식 | AEB: 미작동 | 속도: 0.82 m/s
+차선 상태: 왼쪽 차선 보임, 오른쪽 차선 보임, 신뢰도 0.78(주행 기준 충족), 중심 오차 -0.03, 카메라 정상, 도로영역 확인, 하단 장애물 없음, 상태 lane_follow
+차선: 미인식 | AEB: 미작동 | 속도: 0.50 m/s
+차선 상태: 왼쪽 차선 안 보임, 오른쪽 차선 안 보임, 신뢰도 0.00(신뢰도 부족), 중심 오차 +0.00, 카메라 정상, 도로영역 부족, 하단 장애물 없음, 상태 lane_lost_lidar
+차선: 미인식 | AEB: 작동 | 속도: 0.00 m/s
+차선 상태: 카메라 프레임 없음, 현재 주행 상태는 aeb_stop
 lidar mode=tunnel_center core=0.80m front=0.32m left90=0.21m right90=0.22m reason=side walls detected but 3/9 o'clock clearance is passable
 ```
 

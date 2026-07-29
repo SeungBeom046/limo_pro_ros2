@@ -27,7 +27,7 @@ limo_autonomous_drive:
     straight_steering_threshold: 0.25
     max_angular: 1.35
     steering_smoothing: 0.22
-    kp: 1.70
+    kp: 2.05
     ki: 0.0
     kd: 0.22
     integral_limit: 0.45
@@ -38,6 +38,8 @@ limo_autonomous_drive:
     enable_lane_lost_drive: true
     lane_lost_steering_decay: 0.45
     lane_lost_use_lidar: true
+    allow_lidar_drive_when_camera_invalid: true
+    allow_lidar_drive_without_camera: true
     image_timeout_sec: 0.7
     scan_timeout_sec: 0.7
     depth_timeout_sec: 0.7
@@ -49,14 +51,20 @@ limo_autonomous_drive:
     roi_bottom_width_ratio: 0.92
     roi_top_width_ratio: 0.18
     lookahead_ratio: 0.62
-    white_lane_value_min: 150
-    white_lane_saturation_max: 95
-    yellow_h_min: 15
-    yellow_h_max: 45
-    yellow_s_min: 70
-    yellow_v_min: 80
-    hls_l_min: 115
-    hls_s_min: 55
+    white_lane_value_min: 120
+    white_lane_saturation_max: 135
+    yellow_h_min: 12
+    yellow_h_max: 48
+    yellow_s_min: 45
+    yellow_v_min: 60
+    hls_l_min: 90
+    hls_s_min: 40
+    enable_clahe: true
+    adaptive_block_size: 31
+    adaptive_c: -8
+    relative_white_margin: 18
+    reflection_value_min: 220
+    reflection_saturation_max: 45
     gaussian_kernel_size: 5
     canny_low_threshold: 50
     canny_high_threshold: 150
@@ -69,7 +77,9 @@ limo_autonomous_drive:
     top_lane_width_ratio: 0.22
     bottom_lane_width_ratio: 0.62
     single_lane_offset_ratio: 0.24
-    min_lane_confidence: 0.25
+    single_lane_trust: 0.55
+    single_lane_confidence: 0.30
+    min_lane_confidence: 0.22
     min_lane_area: 80
     max_lane_area_ratio: 0.18
     min_lane_width_ratio: 0.18
@@ -91,8 +101,11 @@ limo_autonomous_drive:
     lane_lost_lidar_angle_deg: 95.0
     lane_lost_clearance_distance: 1.20
     lane_lost_open_distance: 2.50
-    lane_lost_gap_gain: 0.85
-    lane_lost_obstacle_gain: 0.75
+    lane_lost_gap_gain: 0.95
+    lane_lost_obstacle_gain: 0.95
+    lane_lost_wall_gain: 0.50
+    wall_follow_target_distance: 0.45
+    wall_follow_max_distance: 1.20
     aeb_sector_deg: 45.0
     aeb_core_sector_deg: 12.0
     front_sector_deg: 45.0
@@ -111,7 +124,7 @@ limo_autonomous_drive:
     tunnel_side_distance: 0.70
     tunnel_balance_tolerance: 0.28
     tunnel_centering_gain: 0.35
-    avoid_gain: 0.85
+    avoid_gain: 1.05
     enable_aeb_recovery: true
     aeb_recovery_clear_distance: 0.45
     aeb_recovery_reverse_sec: 1.20
