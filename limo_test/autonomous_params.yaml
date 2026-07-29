@@ -31,15 +31,18 @@ limo_autonomous_drive:
     ki: 0.0
     kd: 0.22
     integral_limit: 0.45
-    max_lane_error_step: 0.35
-    lane_hold_time_sec: 0.60
+    max_lane_error_step: 0.18
+    lane_hold_time_sec: 1.20
     lane_hold_speed: 0.75
     lane_hold_min_confidence: 0.12
+    lane_switch_reject_error: 0.45
     enable_lane_lost_drive: true
     lane_lost_steering_decay: 0.45
     lane_lost_use_lidar: true
     allow_lidar_drive_when_camera_invalid: true
     allow_lidar_drive_without_camera: true
+    lane_priority_lidar_steering_limit: 0.28
+    lane_priority_tunnel_speed: 0.35
     image_timeout_sec: 0.7
     scan_timeout_sec: 0.7
     depth_timeout_sec: 0.7
@@ -98,7 +101,7 @@ limo_autonomous_drive:
     # Lidar obstacle avoidance: lidar_obstacle_avoidance.py
     lane_lost_speed: 0.50
     lane_lost_min_speed: 0.50
-    lane_lost_lidar_angle_deg: 95.0
+    lane_lost_lidar_angle_deg: 90.0
     lane_lost_clearance_distance: 1.20
     lane_lost_open_distance: 2.50
     lane_lost_gap_gain: 0.95
@@ -106,16 +109,18 @@ limo_autonomous_drive:
     lane_lost_wall_gain: 0.50
     wall_follow_target_distance: 0.45
     wall_follow_max_distance: 1.20
-    aeb_sector_deg: 45.0
-    aeb_core_sector_deg: 12.0
-    front_sector_deg: 45.0
+    aeb_sector_deg: 90.0
+    aeb_core_sector_deg: 18.0
+    front_sector_deg: 90.0
     side_sector_deg: 100.0
     side_check_angle_deg: 90.0
     side_check_width_deg: 15.0
     closest_sample_count: 1
-    aeb_distance: 0.20
-    stop_distance: 0.50
-    slow_distance: 1.20
+    aeb_distance: 0.25
+    wide_aeb_distance: 0.23
+    wide_aeb_side_distance: 0.16
+    stop_distance: 0.65
+    slow_distance: 1.35
     side_obstacle_distance: 0.34
     passable_side_clearance: 0.15
     passable_avoid_speed: 0.18

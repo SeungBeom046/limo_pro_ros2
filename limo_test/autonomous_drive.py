@@ -32,6 +32,13 @@ class LimoAutonomousDrive(Node):
     """
 
     def __init__(self):
+        """ROS2 pub/sub, 알고리즘 객체, 제어 상태 변수를 초기화합니다.
+
+        이 생성자는 실제 주행 판단을 하지 않습니다. 카메라/라이다 콜백은
+        최신 센서값만 저장하고, 주행 명령 계산은 control_loop()에서
+        일정 주기로만 수행합니다.
+        """
+
         super().__init__("limo_autonomous_drive")
         self._declare_core_parameters()
 
@@ -103,6 +110,14 @@ class LimoAutonomousDrive(Node):
         )
 
     def _declare_core_parameters(self):
+        """통합 노드가 직접 사용하는 ROS 파라미터를 선언합니다.
+
+        카메라 인식 전용 파라미터는 camera_lane_detector.py에서,
+        라이다 회피 전용 파라미터는 lidar_obstacle_avoidance.py에서
+        선언합니다. 여기에는 토픽, 속도, PID, fallback 정책처럼
+        두 알고리즘을 합칠 때 필요한 값만 둡니다.
+        """
+
         # 토픽 이름은 launch argument 또는 YAML에서 덮어쓸 수 있습니다.
         self.declare_parameter("image_topic", "/camera/color/image_raw")
         self.declare_parameter("depth_topic", "/camera/depth/image_raw")
@@ -134,13 +149,14 @@ class LimoAutonomousDrive(Node):
         self.declare_parameter("ki", 0.0)
         self.declare_parameter("kd", 0.22)
         self.declare_parameter("integral_limit", 0.45)
-        self.declare_parameter("max_lane_error_step", 0.35)
+        self.declare_parameter("max_lane_error_step", 0.18)
 
         # 차선이 순간적으로 끊겼을 때
         # 마지막 정상 방향을 짧게 유지합니다.
-        self.declare_parameter("lane_hold_time_sec", 0.60)
+        self.declare_parameter("lane_hold_time_sec", 1.20)
         self.declare_parameter("lane_hold_speed", 0.75)
         self.declare_parameter("lane_hold_min_confidence", 0.12)
+        self.declare_parameter("lane_switch_reject_error", 0.45)
 
         # 차선이 사라지면 라이다 fallback으로 열린 방향을 찾습니다.
         self.declare_parameter("enable_lane_lost_drive", True)
@@ -148,6 +164,8 @@ class LimoAutonomousDrive(Node):
         self.declare_parameter("lane_lost_use_lidar", True)
         self.declare_parameter("allow_lidar_drive_when_camera_invalid", True)
         self.declare_parameter("allow_lidar_drive_without_camera", True)
+        self.declare_parameter("lane_priority_lidar_steering_limit", 0.28)
+        self.declare_parameter("lane_priority_tunnel_speed", 0.35)
 
         # 센서가 오래되면 잘못된 명령을 내지 않도록 제한합니다.
         self.declare_parameter("image_timeout_sec", 0.7)
@@ -157,6 +175,12 @@ class LimoAutonomousDrive(Node):
         self.declare_parameter("camera_obstacle_avoid_gain", 0.45)
 
     def image_qos_profiles(self, parameter_name: str):
+        """카메라 구독에 사용할 QoS 후보를 반환합니다.
+
+        LIMO 카메라 드라이버마다 RELIABLE/BEST_EFFORT 설정이 다를 수 있어
+        기본 auto 모드에서는 두 QoS subscription을 모두 열어둡니다.
+        """
+
         mode = str(self.get_parameter(parameter_name).value).lower()
         reliable = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
@@ -178,6 +202,14 @@ class LimoAutonomousDrive(Node):
         return [reliable, best_effort]
 
     def image_callback(self, msg: Image):
+        """카메라 Image 메시지를 OpenCV 프레임으로 바꿉니다.
+
+        변환한 프레임으로 차선 인식을 수행합니다.
+
+        반환된 LaneResult와 debug image만 저장합니다. 실제 속도/조향 계산은
+        control_loop()에서 라이다 상태와 함께 통합합니다.
+        """
+
         if self.bridge is None:
             return
 
@@ -192,11 +224,26 @@ class LimoAutonomousDrive(Node):
         self.last_image_time = self.get_clock().now()
 
     def scan_callback(self, msg: LaserScan):
+        """최신 LaserScan을 저장합니다.
+
+        라이다 콜백에서는 무거운 판단을 하지 않고, control_loop()에서
+        최신 scan을 이용해 AEB/회피/fallback 판단을 합니다.
+        """
+
         self.latest_scan = msg
         self.last_scan_time = self.get_clock().now()
 
     def control_loop(self):
-        """카메라 차선 추종을 기본으로 하고 라이다 회피를 우선 적용."""
+        """최종 /cmd_vel을 만드는 메인 제어 루프입니다.
+
+        흐름은 다음 순서입니다.
+        1. 센서 timeout 확인
+        2. AEB 복구 동작이 진행 중이면 그 명령을 최우선 적용
+        3. 카메라 차선 기반 기본 속도/조향 계산
+        4. 라이다 안전 판단을 섞되, 차선 인식 중에는 차선을 우선 유지
+        5. 카메라 하단 낮은 장애물 보조 회피 적용
+        6. Twist를 publish하고 테스트 로그/debug image 출력
+        """
 
         now = self.get_clock().now()
         image_ok = self.is_recent(self.last_image_time, "image_timeout_sec")
@@ -282,7 +329,17 @@ class LimoAutonomousDrive(Node):
         self.publish_debug_image()
 
     def lane_follow_command(self, now, lane, dt: float, scan_ok: bool):
+        """차선 인식 결과만 보고 기본 주행 명령을 만듭니다.
+
+        반환값은 speed, steering, lane_valid, lane_lost_active, drive_state입니다.
+        차선이 안정적으로 보이면 PID로 조향하고, 차선이 잠깐 끊기면
+        lane_hold를 사용합니다. 차선이 계속 안 보이면 라이다 fallback으로
+        넘길 수 있도록 lane_lost_active를 True로 반환합니다.
+        """
+
         lane_valid = self.lane_is_valid(lane)
+        if lane_valid and self.is_suspicious_lane_switch(now, lane):
+            lane_valid = False
         lane_lost_active = False
         drive_state = "lane_follow"
 
@@ -356,6 +413,14 @@ class LimoAutonomousDrive(Node):
         drive_state: str,
         now,
     ):
+        """라이다 판단을 카메라 기반 속도/조향에 반영합니다.
+
+        AEB는 항상 최우선입니다. 다만 차선이 정상 인식되는 동안에는
+        slalom/gap/tunnel 회피가 차선을 벗어나게 만들지 않도록
+        라이다 조향 보정량을 제한합니다. 차선을 잃었을 때만 라이다
+        회피 조향이 더 크게 주행 방향을 결정합니다.
+        """
+
         obstacle_speed, obstacle_steering, mode = self.lidar.obstacle_command(
             self.latest_scan
         )
@@ -376,16 +441,42 @@ class LimoAutonomousDrive(Node):
                 speed = float(self.get_parameter("lane_lost_min_speed").value)
             elif lane_valid:
                 speed = float(self.get_parameter("caution_speed").value)
+                steering = self.limit_lidar_steering(steering, obstacle_steering)
+                return speed, steering, "lane_priority_slow"
             else:
                 speed = obstacle_speed
             return speed, obstacle_steering, mode
 
+        if mode in ("passable_avoid", "slalom_gap") and lane_valid:
+            speed = min(
+                speed,
+                max(
+                    obstacle_speed,
+                    float(self.get_parameter("lane_priority_tunnel_speed").value),
+                ),
+            )
+            steering = self.limit_lidar_steering(steering, obstacle_steering)
+            return speed, steering, "lane_priority_keep_lane"
+
+        if mode == "tunnel_center" and lane_valid:
+            speed = min(
+                speed,
+                float(self.get_parameter("lane_priority_tunnel_speed").value),
+            )
+            steering = self.limit_lidar_steering(steering, obstacle_steering)
+            return speed, steering, "lane_priority_tunnel"
+
         if mode in ("slow_avoid", "side_avoid", "corner_guard", "passable_avoid"):
             if lane_valid:
-                speed = max(
-                    min(speed, obstacle_speed),
-                    float(self.get_parameter("lane_follow_min_speed").value),
+                speed = min(
+                    speed,
+                    max(
+                        obstacle_speed,
+                        float(self.get_parameter("lane_priority_tunnel_speed").value),
+                    ),
                 )
+                steering = self.limit_lidar_steering(steering, obstacle_steering)
+                return speed, steering, "lane_priority_obstacle"
             else:
                 speed = min(speed, obstacle_speed)
             return speed, steering + obstacle_steering, mode
@@ -410,12 +501,54 @@ class LimoAutonomousDrive(Node):
 
         return speed, steering, drive_state
 
+    def is_suspicious_lane_switch(self, now, lane: LaneResult) -> bool:
+        """갑자기 다른 차선을 잡은 것으로 보이면 True를 반환합니다.
+
+        직전 정상 차선의 center_error와 현재 center_error 차이가 너무 크면
+        차선 이탈 중 옆 차선을 따라가기 시작한 상황으로 보고,
+        즉시 따라가지 않고 lane_hold가 직전 차선을 잠시 유지하게 합니다.
+        """
+
+        if self.last_lane_seen_time is None:
+            return False
+
+        hold_time = float(self.get_parameter("lane_hold_time_sec").value)
+        age = (now - self.last_lane_seen_time).nanoseconds / 1e9
+        if age > hold_time:
+            return False
+
+        reject_error = float(self.get_parameter("lane_switch_reject_error").value)
+        if abs(lane.center_error - self.last_lane_error) <= reject_error:
+            return False
+
+        self.get_logger().warn(
+            "차선 중심이 급격히 바뀌어 다른 차선으로 판단했습니다. "
+            "직전 차선을 잠시 유지합니다.",
+            throttle_duration_sec=0.5,
+        )
+        return True
+
+    def limit_lidar_steering(self, lane_steering: float, lidar_steering: float) -> float:
+        """차선 추종 중 라이다 조향 보정량을 제한합니다.
+
+        터널 벽이나 통과 가능한 물체를 피하려다가
+        차선 밖으로 나가는 일을 막기 위한 안전장치입니다.
+        """
+
+        limit = float(self.get_parameter("lane_priority_lidar_steering_limit").value)
+        correction = float(np.clip(lidar_steering, -limit, limit))
+        return lane_steering + correction
+
     def lane_is_valid(self, lane: Optional[LaneResult]) -> bool:
+        """현재 LaneResult가 주행에 사용할 만큼 신뢰도 높은지 확인합니다."""
+
         if lane is None:
             return False
         return lane.confidence >= float(self.get_parameter("min_lane_confidence").value)
 
     def can_hold_lane(self, now, lane: Optional[LaneResult]) -> bool:
+        """차선이 잠깐 끊긴 상황에서 직전 차선을 유지할지 판단합니다."""
+
         if self.last_lane_seen_time is None or lane is None or not lane.camera_valid:
             return False
 
@@ -427,6 +560,8 @@ class LimoAutonomousDrive(Node):
         return lane.confidence >= min_hold_conf or lane.geometry_valid or lane.road_valid
 
     def stable_lane_error(self, error: float) -> float:
+        """차선 중심 오차의 프레임 간 변화량을 제한합니다."""
+
         if self.last_lane_seen_time is None:
             return error
         max_step = float(self.get_parameter("max_lane_error_step").value)
@@ -434,6 +569,8 @@ class LimoAutonomousDrive(Node):
         return float(np.clip(self.last_lane_error + delta, -1.0, 1.0))
 
     def pid_steering(self, error: float, dt: float) -> float:
+        """차선 중심 오차를 angular.z 조향값으로 변환합니다."""
+
         kp = float(self.get_parameter("kp").value)
         ki = float(self.get_parameter("ki").value)
         kd = float(self.get_parameter("kd").value)
@@ -445,12 +582,20 @@ class LimoAutonomousDrive(Node):
         return kp * error + ki * self.integral + kd * derivative
 
     def smoothed_steering(self, raw_steering: float) -> float:
+        """PID 조향값을 직전 조향과 섞어 급격한 흔들림을 줄입니다."""
+
         smoothing = float(self.get_parameter("steering_smoothing").value)
         steering = (1.0 - smoothing) * raw_steering + smoothing * self.last_steering
         self.last_steering = steering
         return steering
 
     def speed_from_lane(self, lane: LaneResult, steering: float) -> float:
+        """차선 신뢰도와 조향량을 이용해 기본 전진 속도를 계산합니다.
+
+        조향이 작고 차선 신뢰도가 높으면 빠르게 갑니다.
+        조향이 크거나 신뢰도가 낮으면 느리게 갑니다.
+        """
+
         max_speed = float(self.get_parameter("max_speed").value)
         min_speed = float(self.get_parameter("min_speed").value)
         lane_min_speed = float(self.get_parameter("lane_follow_min_speed").value)
@@ -472,6 +617,12 @@ class LimoAutonomousDrive(Node):
         lane_valid: bool,
         speed: float,
     ) -> bool:
+        """카메라 하단 중앙의 낮은 장애물 의심 영역을 확인합니다.
+
+        고깔 하부처럼 라이다가 늦게 볼 수 있는 물체를 보조적으로
+        감지합니다. 실제 감속/회피 적용은 control_loop()에서 수행합니다.
+        """
+
         return (
             lane is not None
             and lane.road_valid
@@ -482,6 +633,8 @@ class LimoAutonomousDrive(Node):
         )
 
     def publish_command(self, speed: float, steering: float):
+        """계산된 속도/조향을 Twist 메시지로 publish합니다."""
+
         msg = Twist()
         max_angular = float(self.get_parameter("max_angular").value)
         msg.linear.x = float(speed)
@@ -491,6 +644,8 @@ class LimoAutonomousDrive(Node):
         self.cmd_pub.publish(msg)
 
     def publish_debug_image(self):
+        """OpenCV debug image를 ROS Image 토픽으로 발행합니다."""
+
         if (
             self.bridge is None
             or not bool(self.get_parameter("publish_debug_image").value)
@@ -537,6 +692,8 @@ class LimoAutonomousDrive(Node):
             )
 
     def close_debug_window(self):
+        """노드 종료 시 OpenCV debug 창을 정리합니다."""
+
         if not self.debug_window_created:
             return
         try:
@@ -546,12 +703,16 @@ class LimoAutonomousDrive(Node):
             pass
 
     def is_recent(self, stamp, timeout_param: str) -> bool:
+        """센서 timestamp가 timeout 이내인지 확인합니다."""
+
         if stamp is None:
             return False
         age = (self.get_clock().now() - stamp).nanoseconds / 1e9
         return age <= float(self.get_parameter(timeout_param).value)
 
     def publish_stop(self, reason: str):
+        """즉시 정지 Twist를 publish하고 정지 이유를 로그로 남깁니다."""
+
         try:
             self.cmd_pub.publish(Twist())
         except Exception as exc:
@@ -565,6 +726,13 @@ class LimoAutonomousDrive(Node):
         drive_state: str,
         scan_ok: bool,
     ):
+        """테스트 중 보기 쉬운 두 줄짜리 한글 주행 로그를 출력합니다.
+
+        첫 줄은 차선 인식 유무, AEB 작동 여부, 현재 속도입니다.
+        둘째 줄은 좌/우 차선 검출, 신뢰도, 중심 오차,
+        카메라/도로 상태입니다.
+        """
+
         if not bool(self.get_parameter("publish_drive_log").value):
             return
 
@@ -586,6 +754,8 @@ class LimoAutonomousDrive(Node):
         lane_valid: bool,
         drive_state: str,
     ) -> str:
+        """LaneResult를 사람이 읽기 쉬운 한글 상태 문자열로 변환합니다."""
+
         if lane is None:
             return f"카메라 프레임 없음, 현재 주행 상태는 {drive_state}"
 

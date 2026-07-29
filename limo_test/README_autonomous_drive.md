@@ -108,11 +108,13 @@ ros2 run limo_test autonomous_drive --ros-args --params-file ~/wego_ws/src/limo_
 6. `autonomous_drive.py`가 중심 오차를 PID 제어로 조향값에 반영합니다.
    차선이 순간적으로 끊기면 `lane_hold_time_sec` 동안 마지막 정상 차선 방향을
    유지해 갑자기 직진으로 풀리는 현상을 줄입니다.
+   직전 차선 중심과 너무 크게 다른 차선을 갑자기 잡으면
+   `lane_switch_reject_error` 기준으로 다른 차선 추종을 거부합니다.
 7. `lidar_obstacle_avoidance.py`가 전방 장애물이 `slow_distance` 안에 들어오면
    감속하며 빈 공간 쪽으로 회피합니다.
-8. AEB는 넓은 전방 ±45도 전체가 아니라 `aeb_core_sector_deg` 안의 정면 core를
-   우선 봅니다. 정면 core가 `aeb_distance` 20cm 아래이고, 3시/9시 방향 통과 폭이
-   `passable_side_clearance`보다 좁으면 급제동합니다.
+8. AEB는 전방 ±90도를 봅니다. 정면 core는 `aeb_distance`, 넓은 전방은
+   `wide_aeb_distance`와 `wide_aeb_side_distance`의 각도별 기준으로 판단해
+   고깔처럼 정면에서 벗어난 물체도 더 빨리 정지합니다.
 9. 3시/9시 방향이 각각 15cm 이상 열려 있으면 터널 벽이나 통과 가능한 물체가
    전방 섹터에 섞여도 AEB를 바로 걸지 않고 `passable_avoid` 또는
    `tunnel_center`로 통과를 시도합니다.
@@ -150,6 +152,7 @@ ros2 run limo_test autonomous_drive --ros-args --params-file ~/wego_ws/src/limo_
    트래킹 중 갑자기 직진하면 `lane_hold_time_sec`를 조금 올리고,
    잘못된 선을 오래 따라가면 `lane_hold_time_sec`를 낮춥니다.
    코너에서 한쪽 라인에 붙으면 `single_lane_trust`를 낮춥니다.
+   다른 차선을 잡았다가 돌아오면 `lane_switch_reject_error`를 낮춥니다.
 4. 장애물 회피가 늦으면 `slow_distance`, `stop_distance`를 키웁니다.
 5. 터널에서 벽 때문에 튀면 `tunnel_side_distance`와 `tunnel_balance_tolerance`를
    코스 폭에 맞춥니다.

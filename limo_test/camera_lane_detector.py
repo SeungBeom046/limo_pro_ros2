@@ -47,10 +47,19 @@ class OpenCVLaneDetector:
     """
 
     def __init__(self, node):
+        """ROS 노드 핸들을 받아 파라미터 접근과 로그 출력을 공유합니다."""
+
         self.node = node
         self._declare_parameters()
 
     def _declare_parameters(self):
+        """차선 인식에 필요한 OpenCV 튜닝 파라미터를 선언합니다.
+
+        모든 값은 autonomous_params.yaml 또는 launch --ros-args -p로 바꿀 수
+        있습니다. 현장에서는 debug GUI를 보면서
+        색상/ROI/Hough 값을 조정합니다.
+        """
+
         # ROI는 화면 아래쪽 도로 영역만 남기는 사다리꼴입니다.
         self.node.declare_parameter("roi_top_ratio", 0.38)
         self.node.declare_parameter("roi_bottom_width_ratio", 0.92)
@@ -114,6 +123,13 @@ class OpenCVLaneDetector:
         self.node.declare_parameter("lane_log_period_sec", 0.5)
 
     def process(self, frame) -> Tuple[LaneResult, np.ndarray]:
+        """카메라 한 프레임에서 차선 결과와 디버그 이미지를 만듭니다.
+
+        autonomous_drive.py의 image_callback()에서 매 프레임 호출됩니다.
+        내부 처리 순서는 색상 후보 마스크, edge 마스크, ROI, Hough 직선,
+        좌/우 차선 피팅, LaneResult 생성입니다.
+        """
+
         height, width = frame.shape[:2]
         color_mask, road_mask = self._candidate_masks(frame)
         edge_mask = self._edge_mask(frame, color_mask)
@@ -135,6 +151,13 @@ class OpenCVLaneDetector:
         return lane, debug
 
     def _candidate_masks(self, frame):
+        """차선 후보 픽셀과 검은 도로 후보 픽셀을 분리합니다.
+
+        어두운 차선과 햇빛 반사에 대응하기 위해 CLAHE 보정 이미지에서
+        HSV/HLS 고정 임계값, adaptive threshold, 상대 밝기 threshold를 함께
+        사용합니다. 반환값은 lane_mask, road_mask입니다.
+        """
+
         corrected = self._illumination_corrected(frame)
         hsv = cv2.cvtColor(corrected, cv2.COLOR_BGR2HSV)
         hls = cv2.cvtColor(corrected, cv2.COLOR_BGR2HLS)
@@ -208,6 +231,12 @@ class OpenCVLaneDetector:
         return lane_mask, road_mask
 
     def _illumination_corrected(self, frame):
+        """CLAHE로 조명 차이를 완화한 BGR 이미지를 반환합니다.
+
+        빛이 약해 차선이 어둡거나 화면 일부만 밝은 환경에서
+        색상 threshold가 너무 쉽게 깨지는 것을 줄이기 위한 전처리입니다.
+        """
+
         if not bool(self._p("enable_clahe")):
             return frame
 
@@ -219,6 +248,12 @@ class OpenCVLaneDetector:
         return cv2.cvtColor(corrected, cv2.COLOR_LAB2BGR)
 
     def _edge_mask(self, frame, lane_mask):
+        """색상 후보 영역 안에서 edge 성분만 남겨 Hough 입력을 만듭니다.
+
+        Canny는 선의 경계를 잡고, Sobel-x는 세로 방향 차선 edge를 보강합니다.
+        마지막에는 lane_mask와 AND 연산해 도로 외부 edge를 최대한 줄입니다.
+        """
+
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         kernel_size = int(self._p("gaussian_kernel_size"))
         if kernel_size < 3:
@@ -244,6 +279,13 @@ class OpenCVLaneDetector:
         return cv2.bitwise_and(candidate_edges, lane_mask)
 
     def _limit_region(self, edge_mask):
+        """차량 앞 도로 영역만 보도록 사다리꼴 ROI를 적용합니다.
+
+        화면 위쪽의 벽, 사람, 배경 edge가 Hough 검출에 들어가지 않도록
+        하단 중심부만 남깁니다.
+        디버그 이미지에 그릴 ROI 꼭짓점도 함께 반환합니다.
+        """
+
         height, width = edge_mask.shape[:2]
         top_y = int(height * float(self._p("roi_top_ratio")))
         bottom_half = width * float(self._p("roi_bottom_width_ratio")) / 2.0
@@ -263,6 +305,8 @@ class OpenCVLaneDetector:
         return cv2.bitwise_and(edge_mask, mask), points
 
     def _hough_lines(self, roi_mask):
+        """ROI edge 이미지에서 HoughLinesP로 짧은 선분들을 검출합니다."""
+
         lines = cv2.HoughLinesP(
             roi_mask,
             rho=1,
@@ -276,6 +320,13 @@ class OpenCVLaneDetector:
         return [line[0] for line in lines]
 
     def _fit_lanes(self, lines, image_width: int):
+        """Hough 선분을 좌/우 차선 후보로 나누고 각각 직선 피팅합니다.
+
+        기울기가 음수이고 화면 왼쪽에 있으면 왼쪽 차선입니다.
+        기울기가 양수이고 화면 오른쪽에 있으면 오른쪽 차선입니다.
+        반환하는 line은 x = slope * y + intercept 형태입니다.
+        """
+
         left_points = []
         right_points = []
         image_center = image_width / 2.0
@@ -304,6 +355,8 @@ class OpenCVLaneDetector:
         )
 
     def _fit_line(self, points):
+        """여러 점을 x = slope * y + intercept 직선 하나로 근사합니다."""
+
         if len(points) < 4:
             return None
         xs = np.array([point[0] for point in points], dtype=np.float32)
@@ -321,6 +374,14 @@ class OpenCVLaneDetector:
         left_count: int,
         right_count: int,
     ) -> LaneResult:
+        """피팅된 좌/우 차선과 마스크 통계를 LaneResult로 변환합니다.
+
+        양쪽 차선이 모두 보이면 두 차선의 중앙을 목표로 삼습니다.
+        한쪽만 보이면 expected_lane_width_ratio로 반대쪽을 가정하되,
+        single_lane_trust로 화면 중심과 섞어 코너에서 한쪽 라인을 무는 현상을
+        줄입니다.
+        """
+
         height, width = frame.shape[:2]
         image_center = width / 2.0
         lookahead_y = height * float(self._p("lookahead_ratio"))
@@ -412,6 +473,8 @@ class OpenCVLaneDetector:
         )
 
     def _line_x_at(self, line, y: float) -> Optional[float]:
+        """피팅된 직선이 특정 y 위치에서 갖는 x 좌표를 계산합니다."""
+
         if line is None:
             return None
         slope, intercept = line
@@ -421,6 +484,8 @@ class OpenCVLaneDetector:
         return float(x)
 
     def _single_lane_center(self, image_center: float, estimated_center: float) -> float:
+        """한쪽 차선만 보일 때 목표 중심을 보수적으로 보정합니다."""
+
         # 한쪽 차선만 보이는 코너에서는 예상 차선 폭 오차가 커져
         # 차량이 한쪽 라인을 물듯이 붙을 수 있습니다.
         # 추정 중심을 화면 중심과 섞어 과한 한쪽 쏠림을 줄입니다.
@@ -428,6 +493,8 @@ class OpenCVLaneDetector:
         return image_center + trust * (estimated_center - image_center)
 
     def _large_component_count(self, mask) -> int:
+        """너무 큰 흰색 덩어리를 세어 배경/반사 오인을 걸러냅니다."""
+
         min_area = int(self._p("min_lane_area"))
         max_area = int(mask.size * float(self._p("max_lane_area_ratio")))
         count = 0
@@ -439,6 +506,8 @@ class OpenCVLaneDetector:
         return count
 
     def _road_between_lanes_ratio(self, road_mask, left_x: float, right_x: float) -> float:
+        """좌/우 차선 사이의 검은 도로 비율을 계산합니다."""
+
         left = int(max(0, min(left_x, right_x)))
         right = int(min(road_mask.shape[1], max(left_x, right_x)))
         top = int(road_mask.shape[0] * 0.45)
@@ -448,6 +517,13 @@ class OpenCVLaneDetector:
         return float(cv2.countNonZero(between)) / float(between.size)
 
     def _detect_camera_obstacle(self, frame, road_mask, lane_mask):
+        """카메라 하단 중앙의 낮은 장애물 의심 영역을 계산합니다.
+
+        라이다가 고깔 상부만 보고 하부를 늦게 잡는 상황을 보조하기 위한
+        간단한 비전 기반 감지입니다.
+        반환값은 비율, 감지 여부, 좌우 오차입니다.
+        """
+
         height, width = frame.shape[:2]
         top = int(height * float(self._p("camera_obstacle_roi_top_ratio")))
         center_width = int(width * float(self._p("camera_obstacle_center_width_ratio")))
@@ -474,6 +550,12 @@ class OpenCVLaneDetector:
         return ratio, ratio >= float(self._p("camera_obstacle_min_ratio")), error
 
     def _draw_debug(self, frame, lane_mask, roi_points, left_line, right_line, lane):
+        """OpenCV GUI와 debug 토픽에 표시할 시각화 이미지를 만듭니다.
+
+        원본 영상 위에 차선 마스크, ROI, 좌/우 피팅 선, 화면 중심선,
+        추정 차선 중심선을 겹쳐 그립니다.
+        """
+
         debug = frame.copy()
         height, width = frame.shape[:2]
         overlay = cv2.cvtColor(lane_mask, cv2.COLOR_GRAY2BGR)
@@ -504,6 +586,8 @@ class OpenCVLaneDetector:
         return debug
 
     def _draw_fit_line(self, image, line, color):
+        """피팅된 차선 직선을 디버그 이미지에 그립니다."""
+
         if line is None:
             return
         height = image.shape[0]
@@ -516,6 +600,8 @@ class OpenCVLaneDetector:
         cv2.line(image, (int(x1), y1), (int(x2), y2), color, 4)
 
     def _log_lane_status(self, lane: LaneResult, width: int, height: int):
+        """publish_lane_log가 켜졌을 때 차선 상세 수치를 로그로 출력합니다."""
+
         if not bool(self._p("publish_lane_log")):
             return
 
@@ -541,4 +627,6 @@ class OpenCVLaneDetector:
         )
 
     def _p(self, name: str):
+        """ROS 파라미터 값을 짧게 읽기 위한 헬퍼입니다."""
+
         return self.node.get_parameter(name).value
