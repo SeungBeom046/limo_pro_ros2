@@ -80,8 +80,10 @@ limo_autonomous_drive:
     top_lane_width_ratio: 0.22
     bottom_lane_width_ratio: 0.62
     single_lane_offset_ratio: 0.24
-    single_lane_trust: 0.55
-    single_lane_confidence: 0.30
+    single_lane_trust: 0.65
+    single_lane_confidence: 0.36
+    lane_width_memory_alpha: 0.25
+    single_lane_memory_trust: 0.85
     min_lane_confidence: 0.22
     min_lane_area: 80
     max_lane_area_ratio: 0.18

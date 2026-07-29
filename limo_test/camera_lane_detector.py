@@ -50,6 +50,9 @@ class OpenCVLaneDetector:
         """ROS 노드 핸들을 받아 파라미터 접근과 로그 출력을 공유합니다."""
 
         self.node = node
+        self.tracked_lane_width_ratio = None
+        self.tracked_left_offset_ratio = None
+        self.tracked_right_offset_ratio = None
         self._declare_parameters()
 
     def _declare_parameters(self):
@@ -101,6 +104,8 @@ class OpenCVLaneDetector:
         self.node.declare_parameter("single_lane_offset_ratio", 0.24)
         self.node.declare_parameter("single_lane_trust", 0.55)
         self.node.declare_parameter("single_lane_confidence", 0.30)
+        self.node.declare_parameter("lane_width_memory_alpha", 0.25)
+        self.node.declare_parameter("single_lane_memory_trust", 0.85)
         self.node.declare_parameter("min_lane_confidence", 0.25)
         self.node.declare_parameter("min_lane_area", 80)
         self.node.declare_parameter("max_lane_area_ratio", 0.18)
@@ -377,9 +382,10 @@ class OpenCVLaneDetector:
         """피팅된 좌/우 차선과 마스크 통계를 LaneResult로 변환합니다.
 
         양쪽 차선이 모두 보이면 두 차선의 중앙을 목표로 삼습니다.
-        한쪽만 보이면 expected_lane_width_ratio로 반대쪽을 가정하되,
-        single_lane_trust로 화면 중심과 섞어 코너에서 한쪽 라인을 무는 현상을
-        줄입니다.
+        한쪽만 보이면 최근 양쪽 차선이 보였을 때 저장한 차선 폭/오프셋을
+        우선 사용합니다. 저장값이 없으면 expected_lane_width_ratio를 사용하고,
+        single_lane_trust로 화면 중심과 섞어
+        한쪽 라인을 무는 현상을 줄입니다.
         """
 
         height, width = frame.shape[:2]
@@ -433,18 +439,23 @@ class OpenCVLaneDetector:
             road_score = min(road_between_ratio / min_between, 1.0)
             if geometry_valid:
                 confidence = 0.50 + 0.25 * width_score + 0.15 * count_score + 0.10 * road_score
+                self._update_lane_memory(left_x, right_x, lane_center, width)
         elif left_x is not None:
-            expected_width = width * float(self._p("expected_lane_width_ratio"))
-            lane_center = left_x + expected_width / 2.0
-            lane_center = self._single_lane_center(image_center, lane_center)
-            lane_width_ratio = expected_width / float(width)
+            lane_center, lane_width_ratio = self._center_from_single_lane(
+                left_x,
+                "left",
+                image_center,
+                width,
+            )
             geometry_valid = mask_ratio <= float(self._p("max_lane_mask_ratio"))
             confidence = float(self._p("single_lane_confidence")) if geometry_valid else 0.0
         elif right_x is not None:
-            expected_width = width * float(self._p("expected_lane_width_ratio"))
-            lane_center = right_x - expected_width / 2.0
-            lane_center = self._single_lane_center(image_center, lane_center)
-            lane_width_ratio = expected_width / float(width)
+            lane_center, lane_width_ratio = self._center_from_single_lane(
+                right_x,
+                "right",
+                image_center,
+                width,
+            )
             geometry_valid = mask_ratio <= float(self._p("max_lane_mask_ratio"))
             confidence = float(self._p("single_lane_confidence")) if geometry_valid else 0.0
 
@@ -491,6 +502,104 @@ class OpenCVLaneDetector:
         # 추정 중심을 화면 중심과 섞어 과한 한쪽 쏠림을 줄입니다.
         trust = float(np.clip(float(self._p("single_lane_trust")), 0.0, 1.0))
         return image_center + trust * (estimated_center - image_center)
+
+    def _update_lane_memory(
+        self,
+        left_x: float,
+        right_x: float,
+        lane_center: float,
+        image_width: int,
+    ):
+        """최근 정상 차선 폭과 좌/우 차선-중심 거리를 저장합니다.
+
+        햇빛 반사 때문에 한쪽 흰 선만 보이는 순간에도,
+        직전에 양쪽 차선이 보였을 때의 폭과 오프셋을 이용해
+        차량 중심을 복원하기 위한 메모리입니다.
+        """
+
+        alpha = float(np.clip(float(self._p("lane_width_memory_alpha")), 0.0, 1.0))
+        lane_width_ratio = (right_x - left_x) / max(float(image_width), 1.0)
+        left_offset_ratio = (lane_center - left_x) / max(float(image_width), 1.0)
+        right_offset_ratio = (right_x - lane_center) / max(float(image_width), 1.0)
+
+        self.tracked_lane_width_ratio = self._ema(
+            self.tracked_lane_width_ratio,
+            lane_width_ratio,
+            alpha,
+        )
+        self.tracked_left_offset_ratio = self._ema(
+            self.tracked_left_offset_ratio,
+            left_offset_ratio,
+            alpha,
+        )
+        self.tracked_right_offset_ratio = self._ema(
+            self.tracked_right_offset_ratio,
+            right_offset_ratio,
+            alpha,
+        )
+
+    def _center_from_single_lane(
+        self,
+        lane_x: float,
+        side: str,
+        image_center: float,
+        image_width: int,
+    ) -> Tuple[float, float]:
+        """한쪽 차선만 보일 때 저장된 폭/오프셋으로 중심을 추정합니다.
+
+        side가 left이면 보이는 왼쪽 차선에서 오른쪽으로 저장된 offset만큼
+        떨어진 지점을 차선 중앙으로 봅니다. right이면 반대로 계산합니다.
+        메모리가 없을 때만 expected_lane_width_ratio를 fallback으로 씁니다.
+        """
+
+        expected_width_ratio = self._remembered_width_ratio()
+        if side == "left":
+            offset_ratio = self._remembered_offset_ratio(
+                self.tracked_left_offset_ratio,
+                expected_width_ratio / 2.0,
+            )
+            estimated_center = lane_x + offset_ratio * image_width
+        else:
+            offset_ratio = self._remembered_offset_ratio(
+                self.tracked_right_offset_ratio,
+                expected_width_ratio / 2.0,
+            )
+            estimated_center = lane_x - offset_ratio * image_width
+
+        memory_trust = float(
+            np.clip(float(self._p("single_lane_memory_trust")), 0.0, 1.0)
+        )
+        conservative_center = self._single_lane_center(image_center, estimated_center)
+        lane_center = (
+            memory_trust * estimated_center
+            + (1.0 - memory_trust) * conservative_center
+        )
+        return lane_center, expected_width_ratio
+
+    def _remembered_width_ratio(self) -> float:
+        """저장된 차선 폭 또는 기본 예상 폭을 반환합니다."""
+
+        if self.tracked_lane_width_ratio is None:
+            return float(self._p("expected_lane_width_ratio"))
+        return float(self.tracked_lane_width_ratio)
+
+    def _remembered_offset_ratio(
+        self,
+        remembered_offset: Optional[float],
+        fallback_offset: float,
+    ) -> float:
+        """저장된 차선-중심 offset 또는 fallback offset을 반환합니다."""
+
+        if remembered_offset is None:
+            return float(fallback_offset)
+        return float(remembered_offset)
+
+    def _ema(self, previous: Optional[float], current: float, alpha: float) -> float:
+        """차선 폭/오프셋 메모리에 쓰는 지수 이동 평균입니다."""
+
+        if previous is None:
+            return float(current)
+        return float((1.0 - alpha) * previous + alpha * current)
 
     def _large_component_count(self, mask) -> int:
         """너무 큰 흰색 덩어리를 세어 배경/반사 오인을 걸러냅니다."""

@@ -105,6 +105,8 @@ ros2 run limo_test autonomous_drive --ros-args --params-file ~/wego_ws/src/limo_
 5. 좌/우 선분 점들을 `numpy.polyfit()`으로 직선 피팅한 뒤 `lookahead_ratio`
    위치의 차선 중심을 구합니다. 한쪽 차선만 보이면 `expected_lane_width_ratio`
    값으로 반대 차선을 가정합니다.
+   최근 양쪽 차선이 정상적으로 보였던 차선 폭과 차선-중심 오프셋을 기억해,
+   햇빛 반사로 한쪽 흰 선만 보이는 순간에도 그 선과 차량 사이 거리를 유지합니다.
 6. `autonomous_drive.py`가 중심 오차를 PID 제어로 조향값에 반영합니다.
    차선이 순간적으로 끊기면 `lane_hold_time_sec` 동안 마지막 정상 차선 방향을
    유지해 갑자기 직진으로 풀리는 현상을 줄입니다.
@@ -153,6 +155,8 @@ ros2 run limo_test autonomous_drive --ros-args --params-file ~/wego_ws/src/limo_
    잘못된 선을 오래 따라가면 `lane_hold_time_sec`를 낮춥니다.
    코너에서 한쪽 라인에 붙으면 `single_lane_trust`를 낮춥니다.
    다른 차선을 잡았다가 돌아오면 `lane_switch_reject_error`를 낮춥니다.
+   한쪽 차선만 보일 때 중앙 정렬이 늦으면 `single_lane_memory_trust`를 올리고,
+   너무 과하게 꺾이면 낮춥니다.
 4. 장애물 회피가 늦으면 `slow_distance`, `stop_distance`를 키웁니다.
 5. 터널에서 벽 때문에 튀면 `tunnel_side_distance`와 `tunnel_balance_tolerance`를
    코스 폭에 맞춥니다.
