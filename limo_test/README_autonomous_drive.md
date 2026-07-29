@@ -14,6 +14,19 @@ source install/setup.bash
 ros2 launch limo_test autonomous_drive.launch.py
 ```
 
+기본 설정은 OpenCV 디버그 창을 띄웁니다. 창에는 ROI, 차선 후보 마스크,
+좌/우 피팅 선, 화면 중심선과 추정 차선 중심선이 같이 표시됩니다.
+
+```bash
+ros2 launch limo_test autonomous_drive.launch.py display_debug_window:=true
+```
+
+GUI가 없는 SSH/headless 환경이면 끕니다.
+
+```bash
+ros2 launch limo_test autonomous_drive.launch.py display_debug_window:=false
+```
+
 토픽 이름이 다르면 launch argument로 바꿉니다.
 
 ```bash
@@ -70,29 +83,33 @@ ros2 run limo_test autonomous_drive --ros-args --params-file ~/wego_ws/src/limo_
 ## 사용하는 토픽
 
 - Subscribe: `/camera/color/image_raw` (`sensor_msgs/Image`)
-- Subscribe: `/camera/depth/image_raw` (`sensor_msgs/Image`, 기본 비활성)
 - Subscribe: `/scan` (`sensor_msgs/LaserScan`)
 - Publish: `/cmd_vel` (`geometry_msgs/Twist`)
 - Publish: `/limo/autonomy/debug_image` (`sensor_msgs/Image`)
 
+## 파일 구조
+
+- `autonomous_drive.py`: ROS2 노드, 센서 콜백, PID, 최종 `/cmd_vel` 발행
+- `camera_lane_detector.py`: OpenCV 4.12.0 호환 차선 인식 알고리즘
+- `lidar_obstacle_avoidance.py`: 라이다 장애물 회피, AEB, 차선 손실 fallback
+
 ## 알고리즘
 
-1. 카메라 하단 ROI에서 검은 도로와 흰색 좌/우 차선을 분리합니다.
-   실제 트랙은 자동 노출/반사 때문에 흰 선이 어둡게 보일 수 있어 고정 HSV
-   임계값과 ROI 대비 기반 임계값을 함께 사용합니다.
-2. 중간 시야부터 아래까지 여러 row band를 보고, 아래쪽은 차선 폭을 넓게,
-   위쪽은 좁게 기대하는 원근 모델을 적용합니다.
-3. 각 band에서 여러 흰색 peak 후보를 뽑고, 아래에서 위로 가장 연속적인 좌/우
-   차선 후보를 연결합니다.
-4. 내부 흰 선이 많은 트랙에서는 각 band의 여러 후보 중 원근상 기대 차선 폭과
-   가장 잘 맞는 흰 선 쌍을 우선 선택합니다.
-5. `lookahead_ratio` 위치의 좌우 차선 중앙을 주행 목표로 잡고, 한쪽만 보일 때는
-   원근 기반 예상 차선 폭으로 중앙을 추정합니다.
-6. 중심 오차를 PID 제어로 조향값에 반영합니다.
+1. `camera_lane_detector.py`가 BGR/HSV/HLS 색공간에서 흰색/노란색 차선 후보를
+   추출합니다.
+2. Gray 변환, Gaussian blur, Canny edge, Sobel-x 마스크를 적용해 차선 edge를
+   보강합니다.
+3. 차량 앞 바닥만 남기도록 사다리꼴 ROI를 적용합니다.
+4. `cv2.HoughLinesP()`로 선분을 검출하고, 기울기와 화면 위치로 좌/우 차선을
+   분리합니다.
+5. 좌/우 선분 점들을 `numpy.polyfit()`으로 직선 피팅한 뒤 `lookahead_ratio`
+   위치의 차선 중심을 구합니다. 한쪽 차선만 보이면 `expected_lane_width_ratio`
+   값으로 반대 차선을 가정합니다.
+6. `autonomous_drive.py`가 중심 오차를 PID 제어로 조향값에 반영합니다.
    차선이 순간적으로 끊기면 `lane_hold_time_sec` 동안 마지막 정상 차선 방향을
    유지해 갑자기 직진으로 풀리는 현상을 줄입니다.
-7. 라이다 전방 장애물이 `slow_distance` 안에 들어오면 감속하며 빈 공간 쪽으로
-   회피합니다.
+7. `lidar_obstacle_avoidance.py`가 전방 장애물이 `slow_distance` 안에 들어오면
+   감속하며 빈 공간 쪽으로 회피합니다.
 8. 라이다 전방 장애물이 `stop_distance` 안에 들어오면 AEB 전까지는 저속으로
    더 넓은 방향을 향해 회피합니다.
 9. 라이다 전방 15cm 이내는 AEB로 즉시 정지한 뒤, 옵션이 켜져 있으면 짧게
@@ -102,20 +119,20 @@ ros2 run limo_test autonomous_drive --ros-args --params-file ~/wego_ws/src/limo_
    우측 바깥 중 가장 넓은 gap을 골라 `slalom_gap`으로 통과합니다.
 12. 책상 다리처럼 얇은 장애물은 섹터 퍼센타일 대신 가까운 beam 값을 사용해
    감지합니다.
-13. depth 카메라 장애물 회피 코드는 남겨두었지만, 현재 기본값은
-   `enable_depth_obstacle: false`라 구독과 연산을 하지 않습니다.
-14. 차선이 안 보이면 `lane_lost_lidar` fallback으로 전환해 라이다 기준 열린
+13. 차선이 안 보이면 `lane_lost_lidar` fallback으로 전환해 라이다 기준 열린
    방향을 찾고, 가까운 물체 반대쪽으로 조향합니다.
-15. 검은 트랙 화면은 정상 도로로 취급합니다. 화면이 거의 흰색이고 검은 도로가
+14. 검은 트랙 화면은 정상 도로로 취급합니다. 화면이 거의 흰색이고 검은 도로가
    거의 없을 때만 카메라 이상으로 판단합니다.
-16. 카메라 또는 라이다 데이터가 끊기면 속도를 낮추거나 정지합니다.
+15. 카메라 또는 라이다 데이터가 끊기면 속도를 낮추거나 정지합니다.
 
 ## 튜닝 순서
 
 1. 바퀴를 띄우거나 낮은 속도에서 `/cmd_vel`이 안전하게 들어가는지 확인합니다.
-2. `debug_image_topic`을 보면서 `roi_top_ratio`, `lane_min_band_pixels`를 맞춥니다.
+2. `debug_image_topic`을 보면서 `roi_top_ratio`, `roi_top_width_ratio`,
+   `roi_bottom_width_ratio`를 맞춥니다.
    트랙 위에서 차선이 계속 미인식이면 먼저 `black_road_value_max`를 130~150까지
-   올리고, 흰 선이 끊겨 보이면 `white_lane_value_min`을 95~105 범위에서 낮춥니다.
+   올리고, 흰 선이 끊겨 보이면 `white_lane_value_min`을 조금 낮춥니다.
+   노란 차선을 놓치면 `yellow_s_min`, `yellow_v_min`을 낮춥니다.
 3. 차선 중심이 흔들리면 `kd`를 조금 올리고, 반응이 너무 강하면 `kp`를 낮춥니다.
    트래킹 중 갑자기 직진하면 `lane_hold_time_sec`를 조금 올리고,
    잘못된 선을 오래 따라가면 `lane_hold_time_sec`를 낮춥니다.
@@ -147,18 +164,18 @@ ros2 run limo_test autonomous_drive --ros-args --params-file ~/wego_ws/src/limo_
 
 ## 차선 로그 확인
 
-기본 주행 로그는 한 줄에 핵심 3개만 출력합니다.
+기본 주행 로그는 한 줄에 핵심 상태를 출력합니다.
 
 ```text
-차선: 인식 | AEB: 미작동 | 속도: 1.40m/s
-차선: 미인식 | AEB: 미작동 | 속도: 0.50m/s
-차선: 미인식 | AEB: 작동 | 속도: 0.00m/s
+차선: 인식 | 라이다: 정상 | AEB: 미작동 | 상태: lane_follow
+차선: 미인식 | 라이다: 정상 | AEB: 미작동 | 상태: lane_lost_lidar
+차선: 미인식 | 라이다: 정상 | AEB: 작동 | 상태: aeb_stop
 ```
 
 상세 차선 디버깅이 필요하면 `publish_lane_log: true`로 바꾸면 됩니다.
 
 ```text
-lane frame=640x480 roi_y=264:480 roi_h=216 mask=2.30% road=72.00% cam_obs=1.20% cam_hit=False left=185px right=462px left_cnt=5 right_cnt=5 large_reject=0 err=-0.01 conf=0.88
+lane frame=640x480 mask=2.30% road=72.00% road_ok=True cam_ok=True geom_ok=True between=64.00% width=0.48 cam_obs=1.20% cam_hit=False left=185px right=462px left_cnt=5 right_cnt=5 err=-0.01 conf=0.88
 ```
 
 - `mask`: ROI 안에서 흰색 차선으로 잡힌 픽셀 비율입니다. 0에 가까우면 색상
@@ -167,19 +184,14 @@ lane frame=640x480 roi_y=264:480 roi_h=216 mask=2.30% road=72.00% cam_obs=1.20% 
   조명, 검은색 임계값을 봐야 합니다.
 - `road`가 `min_road_ratio_for_lane`보다 낮으면 흰 선이 보여도 차선으로 인정하지
   않고 라이다 fallback으로 전환합니다.
-- 흰 물체 오인을 줄이기 위해 차선 후보는 `min_lane_band_count`개 이상의 row
-  band에서 이어져야 하고, `max_lane_peak_width_ratio`보다 넓은 흰 덩어리는
-  차선에서 제외합니다.
-- 햇빛 반사로 도로가 덜 검게 보일 때는 라인 모양이 충분히 정확하면
-  `reflected_road_ratio_for_lane`, `reflected_road_between_ratio` 기준으로
-  완화해서 차선을 인정합니다.
-- 화면이 거의 전부 흰색이거나 거의 전부 검은색이면 카메라 판단 불가 상태로 보고
-  라이다 fallback 속도를 내지 않고 정지합니다.
+- 화면이 거의 전부 흰색이면 카메라 판단 불가 상태로 보고 정지합니다. 검은 도로가
+  충분히 보이지 않으면 차선 신뢰도를 낮춰 라이다 fallback으로 전환합니다.
 - `cam_obs/cam_hit`: 카메라 하단 중앙의 낮은 장애물 의심 비율과 감지 여부입니다.
 - `left/right`: 좌우 차선 후보의 x 위치입니다. `none`이면 해당 방향 차선을
   못 잡은 것입니다.
-- `left_cnt/right_cnt`: 유효한 row band 개수입니다. 계속 0이면 `roi_top_ratio`,
-  `lane_min_band_pixels`, 흰색 임계값을 조정해야 합니다.
+- `left_cnt/right_cnt`: Hough에서 좌/우 차선으로 분류된 선분 개수입니다. 계속 0이면
+  `roi_top_ratio`, `hough_threshold`, `hough_min_line_length`, 색상 임계값을
+  조정해야 합니다.
 - `large_reject`: 너무 큰 흰색 영역을 배경으로 판단해 버린 횟수입니다. 바닥이나
   책상을 차선으로 오인할 때 이 값이 올라갑니다.
 - `err/conf`: 주행에 실제로 쓰는 중심 오차와 신뢰도입니다.

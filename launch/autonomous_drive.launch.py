@@ -2,6 +2,7 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
 
 
@@ -23,6 +24,7 @@ def generate_launch_description():
     cmd_vel_topic = LaunchConfiguration("cmd_vel_topic")
     image_qos = LaunchConfiguration("image_qos")
     depth_qos = LaunchConfiguration("depth_qos")
+    display_debug_window = LaunchConfiguration("display_debug_window")
 
     return LaunchDescription(
         [
@@ -61,6 +63,11 @@ def generate_launch_description():
                 default_value="auto",
                 description="Depth QoS: auto, reliable, or best_effort.",
             ),
+            DeclareLaunchArgument(
+                "display_debug_window",
+                default_value="true",
+                description="Show OpenCV lane detection GUI window.",
+            ),
             Node(
                 package=package_name,
                 executable="autonomous_drive",
@@ -75,6 +82,10 @@ def generate_launch_description():
                         "cmd_vel_topic": cmd_vel_topic,
                         "image_qos": image_qos,
                         "depth_qos": depth_qos,
+                        "display_debug_window": ParameterValue(
+                            display_debug_window,
+                            value_type=bool,
+                        ),
                     },
                 ],
             ),
